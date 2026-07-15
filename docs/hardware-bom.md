@@ -19,14 +19,14 @@ same binary and default to `role=grid`.
 
 | Qty | Item | Hosts | Address |
 |----|------|-------|---------|
-| 1 | Synology DS224+ NAS | Mosquitto, InfluxDB, Grafana, mqtt-bridge (Docker) | 192.168.1.163 |
-| 1 | KAMRUI Pinova P2 Mini PC (Ryzen 4300U, 16 GB) | Proxmox — OPNsense, Kali, twin backend (future) | 192.168.1.50 |
+| 1 | Synology DS224+ NAS | Mosquitto, InfluxDB, Grafana, mqtt-bridge (Docker) | 203.0.113.163 |
+| 1 | KAMRUI Pinova P2 Mini PC (Ryzen 4300U, 16 GB) | Proxmox — OPNsense, Kali, twin backend (future) | 203.0.113.50 |
 
 ## Control / supervisory (Level 2 / 3)
 
 | Qty | Item | Role | Status |
 |----|------|------|--------|
-| 1 | Raspberry Pi 4 (4 GB) | Ignition SCADA | Running · 192.168.1.153 |
+| 1 | Raspberry Pi 4 (4 GB) | Ignition SCADA | Running · 203.0.113.153 |
 | 1 | Raspberry Pi 3B | OpenPLC | Planned |
 
 ## Networking (Loop 4 segmentation — planned)
@@ -35,7 +35,7 @@ same binary and default to `role=grid`.
 |----|------|------|
 | 1 | MikroTik hEX RB750Gr3 | Lab gateway / VLAN segmentation |
 | 1 | TP-Link TL-SG108E | Managed switch |
-| 1 | Verizon G3100 | ISP router (flat 192.168.1.0/24 today) |
+| 1 | Verizon G3100 | ISP router (flat /24 subnet today, example: 203.0.113.0/24 -- yours will differ) |
 
 > VLAN segmentation is not yet live. Until it is, see ADR-0004 (IPv6 exposure)
 > and SAFETY.md invariant #8. Do not expose this lab to an untrusted network.

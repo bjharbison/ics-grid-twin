@@ -38,12 +38,12 @@ flowchart TB
 ESP32 fleet
    │  MQTT publish, every 2 s, {"value":<float>,"device":"grid-substation-<short>"}
    ▼
-Mosquitto broker  192.168.1.163:1883   (default-deny ACL)
+Mosquitto broker  203.0.113.163:1883   (default-deny ACL)
    │  monitor-reader subscribes #
    ▼
 mqtt-bridge  →  InfluxDB line protocol   (measurement=grid, tags board_id+device)
    ▼
-InfluxDB  192.168.1.163:8086   org "ICS Lab" · bucket ics-telemetry
+InfluxDB  203.0.113.163:8086   org "ICS Lab" · bucket ics-telemetry
    ▼
 Grafana dashboard  ·and·  grid twin (live or replay)
 ```

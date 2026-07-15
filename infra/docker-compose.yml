@@ -7,7 +7,8 @@
 # Copy ../.env.example, or see docs/quickstart.md.
 #
 # NOTE ON EXPOSURE: every port below binds to 0.0.0.0 by default on a flat
-# 192.168.1.0/24 with no VLAN segmentation yet (see docs/adr/0004-ipv6-exposure.md).
+# /24 subnet (example throughout this repo: 203.0.113.0/24 -- yours will
+# differ) with no VLAN segmentation yet (see docs/adr/0004-ipv6-exposure.md).
 # Until Loop 4 lands, this stack should not be reachable from an untrusted
 # network. Do not port-forward any of these.
 
