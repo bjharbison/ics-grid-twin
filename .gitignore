@@ -1,0 +1,41 @@
+# ---- secrets: never commit ----
+.env
+*.env
+!.env.example
+secrets.h
+firmware/**/secrets.h
+infra/mosquitto/config/passwd
+infra/mosquitto/config/acl
+!infra/mosquitto/config/*.example
+*.pem
+*.key
+*.token
+tokens/
+
+# ---- runtime data ----
+infra/data/
+influxdb/
+grafana/data/
+mosquitto/data/
+mosquitto/log/
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# ---- arduino build ----
+build/
+*.bin
+*.elf
+
+# ---- os / editor ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

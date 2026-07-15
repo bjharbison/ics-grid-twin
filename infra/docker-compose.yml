@@ -1,0 +1,101 @@
+# ICS grid substation lab -- historian + broker stack.
+#
+# Bring up:   docker compose up -d
+# Teardown:   docker compose down          (add -v to wipe volumes)
+#
+# All credentials come from a gitignored .env in this directory.
+# Copy ../.env.example, or see docs/quickstart.md.
+#
+# NOTE ON EXPOSURE: every port below binds to 0.0.0.0 by default on a flat
+# 192.168.1.0/24 with no VLAN segmentation yet (see docs/adr/0004-ipv6-exposure.md).
+# Until Loop 4 lands, this stack should not be reachable from an untrusted
+# network. Do not port-forward any of these.
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"   # raw MQTT -- field devices, bridge, fleet manager
+      - "9001:9001"   # MQTT over WebSockets -- the browser-based twin
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./data/mosquitto/data:/mosquitto/data
+      - ./data/mosquitto/log:/mosquitto/log
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_USER}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASSWORD}
+      # Org name is case- and space-sensitive. "ICS Lab" != "ics-lab".
+      # Getting this wrong is the single most common bring-up failure.
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN}
+    volumes:
+      - ./data/influxdb/data:/var/lib/influxdb2
+      - ./data/influxdb/config:/etc/influxdb2
+
+  mqtt-bridge:
+    build: ./mqtt-bridge
+    container_name: mqtt-bridge
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+      - influxdb
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USER: ${MQTT_USER}
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_ORG: ${INFLUX_ORG}
+      INFLUX_BUCKET: ${INFLUX_BUCKET}
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - influxdb
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./data/grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+
+  # ------------------------------------------------------------------------
+  # Six-feeder mock fleet -- NO HARDWARE REQUIRED.
+  #
+  #   docker compose --profile sim up
+  #
+  # Stands in for the ESP32 fleet so a fresh clone can watch the whole pipeline
+  # work: broker -> bridge -> InfluxDB -> Grafana dashboard, plus the fleet
+  # manager and the twin. Not started by default: with real boards publishing,
+  # this would double up.
+  # ------------------------------------------------------------------------
+  mock-fleet:
+    build: ../scripts
+    container_name: mock-fleet
+    restart: unless-stopped
+    profiles: ["sim"]
+    depends_on:
+      - mosquitto
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_FIELD_USER: ${MQTT_FIELD_USER:-esp32-field}
+      MQTT_FIELD_PASSWORD: ${MQTT_FIELD_PASSWORD}

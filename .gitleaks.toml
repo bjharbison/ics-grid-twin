@@ -1,0 +1,16 @@
+# gitleaks config. Extends the default ruleset.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented, non-secret references"
+paths = [
+  # ADR-0004 documents the IPv6 exposure by design. The prefix is a network
+  # identifier, not a credential -- naming it is the whole point of the record.
+  '''docs/adr/0004-ipv6-exposure.md''',
+]
+regexes = [
+  # Placeholder values in *.example templates are intentional.
+  '''your-[a-z-]+''',
+  '''YOUR_[A-Z_]+''',
+]

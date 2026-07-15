@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # full history, not just the tip -- a secret removed
+                            # in a later commit is still a secret in the history
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  no-secret-files-tracked:
+    name: no secret-bearing files tracked
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert gitignored secret files are absent from the index
+        run: |
+          fail=0
+          for f in .env infra/.env \
+                   infra/mosquitto/config/passwd \
+                   infra/mosquitto/config/acl \
+                   firmware/universal_field/secrets.h; do
+            if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+              echo "ERROR: $f is tracked and must not be"; fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] && echo "No secret-bearing files tracked."
+          exit $fail
+
+  invariants:
+    name: safety invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The load-bearing check. Asserts the twin, the mock fleet, the fleet
+      # manager and the firmware all agree on breaker polarity, tag names,
+      # topic shape, physics constants and the Industroyer signature. This is
+      # what makes doc-vs-firmware drift fail a build instead of shipping.
+      # See docs/adr/0002 and docs/adr/0009.
+      - name: verify physics and safety invariants
+        run: python fleet-manager/verify_physics.py
+
+  sanity:
+    name: config sanity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate JSON / YAML / Python
+        run: |
+          pip install pyyaml
+          python -c "import json; json.load(open('infra/grafana/dashboards/grid-fleet.json'))"
+          python - <<'PY'
+          import yaml
+          for f in ("infra/docker-compose.yml",
+                    ".pre-commit-config.yaml",
+                    "infra/grafana/provisioning/datasources/influxdb.yml",
+                    "infra/grafana/provisioning/dashboards/dashboards.yml",
+                    ".github/workflows/ci.yml"):
+              yaml.safe_load(open(f))
+          print("yaml ok")
+          PY
+          python -m py_compile \
+            fleet-manager/esp32_fleet.py \
+            fleet-manager/verify_physics.py \
+            infra/mqtt-bridge/bridge.py \
+            scripts/mock_fleet.py \
+            tools/capture_demo.py
+          echo "python ok"
+
+  twin:
+    name: twin javascript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Extract and syntax-check the twin's script
+        run: |
+          python3 - <<'PY'
+          import re
+          h = open("twin/grid_twin.html").read()
+          open("/tmp/twin.js", "w").write(re.findall(r"<script>(.*?)</script>", h, re.S)[-1])
+          PY
+          node --check /tmp/twin.js
+          echo "twin js ok"

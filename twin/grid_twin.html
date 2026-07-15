@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grid Substation Twin — 12.47 kV Distribution Feeder</title>
+<!--
+  grid_twin.html — digital twin of one 12.47 kV distribution feeder bay.
+
+  RUNS WITH NO HARDWARE. The physics below is a line-by-line port of
+  universal_field.ino updatePhysics() (FW 1.0.0-grid). Same constants, same
+  coupling, same tick interval. That is deliberate: the twin is validated
+  against firmware ground truth rather than inventing a plausible-looking
+  model of its own.
+
+  THE POINT OF THIS FILE
+  Opening the breaker collapses feeder CURRENT and REAL POWER while bus
+  VOLTAGE HOLDS. That is the Industroyer / 2016 Ukraine signature. It is not
+  a blackout — a twin that renders breaker-open as total de-energization is
+  showing you something that did not happen. Watch the bus stay amber.
+
+  LIVE DATA: see the MQTT section at the bottom of this script. One function
+  swaps the simulator for live telemetry; nothing else changes.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- mqtt.js: only needed for the live path. If it fails to load (offline), the
+     simulator still runs -- the twin never hard-depends on the network. -->
+<script src="https://unpkg.com/mqtt@5.7.0/dist/mqtt.min.js"></script>
+<style>
+  :root{
+    --bg:#0A0E14; --panel:#121821; --panel-2:#161E2A; --line:#243044;
+    --txt:#C9D6E5; --dim:#6B7C93; --faint:#3A4759;
+    --pa:#E8A33D; --pb:#3DB8E8; --pc:#D93DE8;
+    --ok:#2AA198; --warn:#B58900; --alarm:#DC322F; --dead:#3E4A5C;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--txt);
+    font-family:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+    font-size:13px; line-height:1.5;
+    padding:18px; min-height:100vh;
+  }
+  h1,h2,.disp{font-family:'Space Grotesk',system-ui,sans-serif}
+
+  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+    border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:16px}
+  h1{font-size:19px;font-weight:700;letter-spacing:-.01em}
+  .sub{color:var(--dim);font-size:12px}
+  .badge{margin-left:auto;font-size:11px;padding:4px 9px;border:1px solid var(--warn);
+    color:var(--warn);border-radius:2px;letter-spacing:.04em}
+  .badge.live{border-color:var(--ok);color:var(--ok)}
+
+  .grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,1fr);gap:16px}
+  @media(max-width:900px){.grid{grid-template-columns:1fr}}
+
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:14px}
+  .panel h2{font-size:11px;font-weight:500;color:var(--dim);letter-spacing:.12em;
+    text-transform:uppercase;margin-bottom:12px}
+
+  svg{width:100%;height:auto;display:block}
+  .cond{stroke-width:3;fill:none;transition:stroke .45s ease,opacity .45s ease}
+  .live-c{stroke:var(--pa)} .dead-c{stroke:var(--dead)}
+  .flow{stroke-width:3;fill:none;stroke-dasharray:5 9;stroke-linecap:round}
+  .lbl{font:500 10px 'IBM Plex Mono',monospace;fill:var(--dim);letter-spacing:.06em}
+  .val{font:600 12px 'IBM Plex Mono',monospace;fill:var(--txt)}
+
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{text-align:left;font-weight:500;color:var(--dim);font-size:10px;letter-spacing:.08em;
+    text-transform:uppercase;padding:5px 4px;border-bottom:1px solid var(--line)}
+  td{padding:5px 4px;border-bottom:1px solid rgba(36,48,68,.45);font-variant-numeric:tabular-nums}
+  td.n{text-align:right;font-weight:500}
+  .ta{color:var(--pa)}.tb{color:var(--pb)}.tc{color:var(--pc)}
+  .prov{color:var(--faint);font-size:9px;letter-spacing:.05em}
+
+  .ctl{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}
+  button{font-family:inherit;font-size:11px;padding:7px 11px;background:var(--panel-2);
+    color:var(--txt);border:1px solid var(--line);border-radius:2px;cursor:pointer;
+    letter-spacing:.04em;transition:border-color .15s,color .15s}
+  button:hover{border-color:var(--dim)}
+  button:focus-visible{outline:2px solid var(--pb);outline-offset:2px}
+  button.danger:hover{border-color:var(--alarm);color:var(--alarm)}
+  button[disabled]{opacity:.35;cursor:not-allowed}
+
+  .alarm-bar{background:rgba(220,50,47,.11);border:1px solid var(--alarm);color:var(--alarm);
+    padding:9px 11px;border-radius:2px;margin-bottom:12px;font-size:11px;display:none}
+  .alarm-bar.on{display:block;animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.62}}
+
+  .note{color:var(--dim);font-size:11px;margin-top:10px;line-height:1.65}
+  .k{color:var(--pa)}
+
+  .badge.stale{border-color:var(--warn);color:var(--warn)}
+  .badge.offline{border-color:var(--dead);color:var(--dim)}
+  .badge.err{border-color:var(--alarm);color:var(--alarm)}
+
+  /* stale/offline must read as visually distinct -- never freeze at the last
+     value as though it were live */
+  body.stale .val,body.stale td.n{opacity:.4;transition:opacity .3s}
+  body.stale .cond{stroke:var(--dead)!important}
+  body.stale .flow{opacity:0!important;animation:none!important}
+
+  dialog{background:var(--panel);border:1px solid var(--line);border-radius:3px;
+    color:var(--txt);padding:18px;width:min(400px,92vw);font-family:inherit;font-size:12px}
+  dialog::backdrop{background:rgba(5,8,12,.78)}
+  dialog h3{font-family:'Space Grotesk',sans-serif;font-size:14px;margin-bottom:4px}
+  .fld{display:block;margin:10px 0 3px;color:var(--dim);font-size:10px;
+    letter-spacing:.08em;text-transform:uppercase}
+  input,select{width:100%;padding:6px 8px;background:var(--bg);color:var(--txt);
+    border:1px solid var(--line);border-radius:2px;font-family:inherit;font-size:12px}
+  input:focus,select:focus{outline:none;border-color:var(--pb)}
+  .dlg-msg{margin-top:10px;font-size:11px;min-height:15px;color:var(--dim)}
+  .dlg-msg.bad{color:var(--alarm)}
+  .dlg-msg.good{color:var(--ok)}
+  @media(prefers-reduced-motion:reduce){
+    *{animation:none!important;transition:none!important}
+    .flow{stroke-dasharray:none}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Grid Substation Twin</h1>
+  <span class="sub">12.47 kV distribution · 7.2 kV φ-N · feeder bay</span>
+  <span class="badge" id="srcBadge">SIMULATED · no hardware required</span>
+</header>
+
+<div class="alarm-bar" id="alarmBar"></div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>One-line diagram</h2>
+    <svg viewBox="0 0 640 380" role="img" aria-label="Substation one-line diagram">
+      <!-- incoming source -->
+      <text x="20" y="34" class="lbl">SOURCE 12.47 kV</text>
+      <path id="c-src" class="cond live-c" d="M40 50 L40 96"/>
+      <path id="f-src" class="flow" d="M40 50 L40 96"/>
+
+      <!-- HV bus -->
+      <path id="c-bus" class="cond live-c" d="M40 96 L600 96" stroke-width="5"/>
+      <text x="560" y="86" class="lbl" text-anchor="end">HV BUS</text>
+
+      <!-- transformer -->
+      <path id="c-t1" class="cond live-c" d="M180 96 L180 132"/>
+      <path id="f-t1" class="flow" d="M180 96 L180 132"/>
+      <circle id="xf-a" cx="180" cy="150" r="19" fill="none" stroke="var(--pa)" stroke-width="2.5"/>
+      <circle id="xf-b" cx="180" cy="172" r="19" fill="none" stroke="var(--pa)" stroke-width="2.5"/>
+      <rect id="xf-heat" x="146" y="126" width="68" height="70" rx="3" fill="var(--pa)" opacity="0"/>
+      <text x="228" y="152" class="lbl">TRANSFORMER</text>
+      <text x="228" y="168" class="val" id="tTemp">—</text>
+      <path id="c-t2" class="cond live-c" d="M180 190 L180 226"/>
+      <path id="f-t2" class="flow" d="M180 190 L180 226"/>
+
+      <!-- breaker (IEEE device 52) -->
+      <rect id="brk-box" x="163" y="226" width="34" height="34" rx="2"
+            fill="none" stroke="var(--pa)" stroke-width="2.5"/>
+      <line id="brk-arm" x1="180" y1="226" x2="180" y2="260"
+            stroke="var(--pa)" stroke-width="3" style="transition:all .35s ease"/>
+      <text x="210" y="240" class="lbl">52</text>
+      <text x="210" y="255" class="val" id="brkState">—</text>
+
+      <!-- feeder out -->
+      <path id="c-fdr" class="cond live-c" d="M180 260 L180 330"/>
+      <path id="f-fdr" class="flow" d="M180 260 L180 330"/>
+      <path id="c-load" class="cond live-c" d="M120 330 L240 330"/>
+      <text x="252" y="334" class="lbl">FEEDER LOAD</text>
+      <text x="252" y="350" class="val" id="fdrI">—</text>
+
+      <!-- readouts -->
+      <text x="400" y="150" class="lbl">BUS VOLTAGE φ-N</text>
+      <text x="400" y="172" class="val ta" id="vA">—</text>
+      <text x="400" y="190" class="val tb" id="vB">—</text>
+      <text x="400" y="208" class="val tc" id="vC">—</text>
+      <text x="400" y="244" class="lbl">FEEDER CURRENT</text>
+      <text x="400" y="266" class="val ta" id="iA">—</text>
+      <text x="400" y="284" class="val tb" id="iB">—</text>
+      <text x="400" y="302" class="val tc" id="iC">—</text>
+      <text x="400" y="338" class="lbl">REAL POWER</text>
+      <text x="400" y="358" class="val" id="pKw">—</text>
+    </svg>
+  </div>
+
+  <div>
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Telemetry · 11 tags</h2>
+      <table>
+        <thead><tr><th>Tag</th><th style="text-align:right">Value</th><th style="text-align:right">Unit</th></tr></thead>
+        <tbody id="tags"></tbody>
+      </table>
+      <p class="note">
+        Every tag rides one slow-moving load factor. The load factor itself is
+        <em>never published</em> — the firmware keeps it internal, so anything
+        consuming this feed has to estimate it by inverting the voltage sag.
+        Estimated load: <span class="k" id="loadEst">—</span>
+      </p>
+    </div>
+
+    <div class="panel" style="margin-bottom:16px">
+      <h2>Data source</h2>
+      <div class="ctl">
+        <button id="btnSim">Use simulator</button>
+        <button id="btnLive">Connect to fleet…</button>
+        <button id="btnDisc" style="display:none">Disconnect</button>
+      </div>
+      <p class="note" id="srcNote">
+        Running the built-in simulator — the firmware physics, ported. Connect to
+        the fleet to render a real board's telemetry instead.
+      </p>
+    </div>
+
+    <div class="panel">
+      <h2>Controls</h2>
+      <div class="ctl">
+        <button id="btnTrip" class="danger">Trip breaker</button>
+        <button id="btnClose">Close breaker</button>
+        <button id="btnAttack" class="danger">Run Industroyer scenario</button>
+        <button id="btnReset">Reset</button>
+      </div>
+      <p class="note">
+        <strong style="color:var(--txt)">Watch the bus, not the breaker.</strong>
+        On trip, feeder current and real power collapse while bus voltage holds
+        steady. The conductor above the breaker stays amber; everything below
+        goes grey. That asymmetry is the detection signal — a total blackout
+        would mean something else entirely happened.
+      </p>
+    </div>
+  </div>
+</div>
+
+<dialog id="dlg">
+  <h3>Connect to fleet</h3>
+  <p style="color:var(--dim);font-size:11px;line-height:1.6">
+    Read-only. Use the <code style="color:var(--pa)">monitor-reader</code> account —
+    the twin only ever subscribes. Credentials are held in memory for this tab and
+    never stored or sent anywhere else.
+  </p>
+
+  <label class="fld" for="dHost">Broker host</label>
+  <input id="dHost" value="192.168.1.163" autocomplete="off">
+
+  <label class="fld" for="dPort">WebSocket port</label>
+  <input id="dPort" value="9001" inputmode="numeric" autocomplete="off">
+
+  <label class="fld" for="dUser">Username</label>
+  <input id="dUser" value="monitor-reader" autocomplete="off">
+
+  <label class="fld" for="dPass">Password</label>
+  <input id="dPass" type="password" autocomplete="off" placeholder="from Vaultwarden">
+
+  <label class="fld" for="dBoard">Feeder</label>
+  <select id="dBoard"><option value="">— discover after connecting —</option></select>
+
+  <p class="dlg-msg" id="dMsg"></p>
+
+  <div class="ctl" style="margin-top:14px">
+    <button id="dGo">Connect</button>
+    <button id="dCancel">Cancel</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+/* ==========================================================================
+   PHYSICS — direct port of universal_field.ino updatePhysics()
+   Constants match firmware exactly. Do not "improve" them; they are the
+   contract this twin is validated against.
+   ========================================================================== */
+const TICK_MS = 2000;            // firmware PUBLISH_MS
+const V_NOM = 7250.0, V_SAG = 0.015;
+const I_BASE = 150.0, I_SPAN = 200.0;
+const T_BASE = 45.0,  T_SPAN = 30.0, T_ALPHA = 0.03;
+const XFMR_WARN = 72, XFMR_RED = 80;
+
+// Arduino random(a,b) is [a,b) — integer, upper-exclusive.
+const arnd = (a,b) => Math.floor(Math.random()*(b-a))+a;
+const clamp = (v,lo,hi) => Math.min(hi, Math.max(lo, v));
+
+const st = {
+  loadWalk: 0.60, curLoad: 0.60,
+  V: [0,0,0], I: [0,0,0],
+  freq: 60.00, pf: 0.97, kw: 0, temp: 55.0,
+  breakerClosed: true,
+  boardOffset: 0.0,          // MAC-derived on real hardware; 0 for the sim
+  t0: Date.now(),
+};
+
+function updatePhysics(){
+  st.loadWalk = clamp(st.loadWalk + arnd(-20,21)/1000, 0.30, 0.95);
+  const diurnal = 0.10 * Math.sin(((Date.now()-st.t0)/600000) * 6.2832);
+  st.curLoad = clamp(st.loadWalk + diurnal + st.boardOffset, 0.20, 0.99);
+
+  // NOTE the asymmetry — this single line is the whole demo:
+  // voltage sags against curLoad, current is driven by ld. Open the breaker
+  // and ld goes to zero while curLoad keeps walking. Voltage therefore HOLDS.
+  const ld = st.breakerClosed ? st.curLoad : 0.0;
+
+  for (let i=0;i<3;i++){
+    const imb = 1.0 + ((i-1)*0.004);
+    st.V[i] = (V_NOM*(1.0 - V_SAG*st.curLoad))*imb + arnd(-30,31);
+    st.I[i] = st.breakerClosed
+      ? (I_BASE + I_SPAN*ld)*imb + arnd(-8,9)
+      : arnd(0,3);
+  }
+
+  // Frequency is a bounded random walk pulled to nominal. It is NOT coupled
+  // to load in FW 1.0.0-grid, despite what earlier specs claimed. See ADR-0002.
+  st.freq = clamp(st.freq + arnd(-4,5)/1000 + (60.00 - st.freq)*0.05, 59.95, 60.05);
+
+  st.pf = clamp(0.985 - 0.06*ld + arnd(-5,6)/1000, 0.90, 0.995);
+  const pSum = st.V[0]*st.I[0] + st.V[1]*st.I[1] + st.V[2]*st.I[2];
+  st.kw = (pSum * st.pf)/1000.0;
+
+  // First-order thermal integrator. tau ~= TICK/alpha ~= 66 s.
+  // Ceiling is T_BASE + T_SPAN*0.99 ~= 74.7 C, so the 80 C red band is NOT
+  // reachable from load alone — an overload demo needs injection.
+  st.temp += ((T_BASE + T_SPAN*ld) - st.temp) * T_ALPHA;
+}
+
+/* ==========================================================================
+   RENDER
+   ========================================================================== */
+const $ = id => document.getElementById(id);
+const TAGS = [
+  ["voltage_a","V",()=>st.V[0],0,"ta"], ["voltage_b","V",()=>st.V[1],0,"tb"],
+  ["voltage_c","V",()=>st.V[2],0,"tc"],
+  ["current_a","A",()=>st.I[0],0,"ta"], ["current_b","A",()=>st.I[1],0,"tb"],
+  ["current_c","A",()=>st.I[2],0,"tc"],
+  ["frequency","Hz",()=>st.freq,3,""], ["power_factor","",()=>st.pf,3,""],
+  ["real_power_kw","kW",()=>st.kw,0,""], ["transformer_temp","°C",()=>st.temp,1,""],
+  ["breaker_status","",()=>st.breakerClosed?1:0,0,""],
+];
+
+$("tags").innerHTML = TAGS.map(([n,u,,,c])=>
+  `<tr><td>${n}</td><td class="n ${c}" id="tg-${n}">—</td><td class="n prov">${u}</td></tr>`
+).join("");
+
+// Load estimator — inverts the firmware's voltage sag. Voltage is the right
+// basis, not current: current reads zero on an open breaker, voltage doesn't.
+function estimateLoad(){
+  const vAvg = (st.V[0]+st.V[1]+st.V[2])/3;
+  return clamp((1.0 - vAvg/V_NOM)/V_SAG, 0, 1);
+}
+
+const flows = ["f-src","f-t1","f-t2","f-fdr"].map($);
+const deadables = ["c-t2","c-fdr","c-load"].map($);
+
+function render(){
+  for (const [n,,get,d] of TAGS) $(`tg-${n}`).textContent = get().toFixed(d);
+
+  $("vA").textContent = st.V[0].toFixed(0)+" V";
+  $("vB").textContent = st.V[1].toFixed(0)+" V";
+  $("vC").textContent = st.V[2].toFixed(0)+" V";
+  $("iA").textContent = st.I[0].toFixed(0)+" A";
+  $("iB").textContent = st.I[1].toFixed(0)+" A";
+  $("iC").textContent = st.I[2].toFixed(0)+" A";
+  $("pKw").textContent = st.kw.toFixed(0)+" kW";
+  $("fdrI").textContent = st.I[0].toFixed(0)+" A";
+  $("tTemp").textContent = st.temp.toFixed(1)+" °C";
+  $("loadEst").textContent = estimateLoad().toFixed(2);
+
+  const closed = st.breakerClosed;
+  $("brkState").textContent = closed ? "CLOSED" : "OPEN";
+  $("brkState").style.fill = closed ? "var(--ok)" : "var(--alarm)";
+
+  // Breaker arm physically lifts on trip.
+  const arm = $("brk-arm");
+  arm.setAttribute("x2", closed ? 180 : 199);
+  arm.setAttribute("y2", closed ? 260 : 234);
+  arm.setAttribute("stroke", closed ? "var(--pa)" : "var(--alarm)");
+  $("brk-box").setAttribute("stroke", closed ? "var(--pa)" : "var(--alarm)");
+
+  // THE SIGNATURE: only the conductors BELOW the breaker de-energize.
+  // c-src / c-bus / c-t1 stay live because bus voltage holds.
+  for (const el of deadables) el.classList.toggle("dead-c", !closed);
+  for (const el of deadables) el.classList.toggle("live-c", closed);
+
+  // Current-flow animation speed tracks actual current.
+  const iAvg = (st.I[0]+st.I[1]+st.I[2])/3;
+  const dur = closed ? Math.max(0.35, 2.6 - (iAvg/350)*2.0) : 0;
+  flows.forEach((f,idx)=>{
+    const below = idx >= 2;                    // f-t2, f-fdr are downstream
+    const on = closed || !below;
+    f.style.stroke = on ? "var(--pa)" : "transparent";
+    f.style.opacity = on ? .9 : 0;
+    f.style.animation = (on && dur) ? `dash ${dur}s linear infinite` : "none";
+  });
+
+  // Transformer thermal tint.
+  const heat = clamp((st.temp - 50)/(XFMR_RED - 50), 0, 1);
+  const hx = $("xf-heat");
+  hx.setAttribute("opacity", (heat*0.22).toFixed(3));
+  hx.setAttribute("fill", st.temp>=XFMR_RED ? "var(--alarm)"
+                        : st.temp>=XFMR_WARN ? "var(--warn)" : "var(--pa)");
+  const tcol = st.temp>=XFMR_RED ? "var(--alarm)" : st.temp>=XFMR_WARN ? "var(--warn)" : "var(--txt)";
+  $("tTemp").style.fill = tcol;
+  for (const c of ["xf-a","xf-b"]) $(c).setAttribute("stroke", closed ? tcol : "var(--dead)");
+}
+
+const style = document.createElement("style");
+style.textContent = "@keyframes dash{to{stroke-dashoffset:-28}}";
+document.head.appendChild(style);
+
+/* ==========================================================================
+   CONTROLS / SCENARIO
+   ========================================================================== */
+function alarm(msg){
+  const b = $("alarmBar");
+  if (!msg){ b.classList.remove("on"); b.innerHTML=""; return; }
+  b.innerHTML = msg; b.classList.add("on");
+}
+
+function setBreaker(closed){
+  st.breakerClosed = closed;
+  render();
+}
+
+$("btnTrip").onclick  = () => { setBreaker(false);
+  alarm("<strong>BREAKER OPEN</strong> — feeder de-energized. Bus voltage holding at nominal."); };
+$("btnClose").onclick = () => { setBreaker(true); alarm(null); };
+$("btnReset").onclick = () => {
+  st.breakerClosed = true; st.loadWalk = 0.60; st.temp = 55.0; st.t0 = Date.now();
+  alarm(null); render();
+};
+
+$("btnAttack").onclick = () => {
+  const b = $("btnAttack"); b.disabled = true;
+  alarm("<strong>UNAUTHORIZED CONTROL COMMAND</strong> — breaker open issued to feeder. " +
+        "TTP consistent with Industroyer / CRASHOVERRIDE (2016 Ukraine): direct " +
+        "manipulation of a breaker control point, no exploit required.");
+  setBreaker(false);
+  setTimeout(()=>{
+    alarm("<strong>SIGNATURE CONFIRMED</strong> — current and real power collapsed; " +
+          "bus voltage held at nominal. This is a commanded trip, not a fault. " +
+          "A fault would drag voltage down with it.");
+  }, 5000);
+  setTimeout(()=>{ setBreaker(true); alarm(null); b.disabled = false; }, 12000);
+};
+
+/* ==========================================================================
+   LIVE MQTT PATH
+   --------------------------------------------------------------------------
+   The simulator and the live feed write to the SAME `st` object, so nothing
+   downstream — render, the one-line diagram, the estimator — knows or cares
+   which source is driving. That's the whole reason the swap is cheap.
+
+   Requires a broker with a websockets listener (Mosquitto: `listener 9001` +
+   `protocol websockets`). A browser can't open a raw TCP socket, so port 1883
+   is unreachable from here by construction.
+
+   Read-only, always: this connects as `monitor-reader` and only ever
+   subscribes. Commands are the fleet manager's job, not the twin's — a
+   visualization that can also actuate is a bigger blast radius than it needs
+   to be. Trip/scenario buttons are disabled while live.
+   ========================================================================== */
+const live = { client:null, board:null, lastMsg:0, stale:false, connected:false };
+const STALE_MS = 10000;   // 5 missed publish intervals
+
+// Declared here, above every function that touches it. `let` has no hoisting,
+// so leaving this at the bottom of the file would put stopSim()/startSim() in
+// the temporal dead zone for anyone who later calls them during init.
+let simTimer = null;
+
+function stopSim(){ if (simTimer){ clearInterval(simTimer); simTimer = null; } }
+function startSim(){
+  if (!simTimer) simTimer = setInterval(()=>{ updatePhysics(); render(); }, TICK_MS);
+}
+
+function setBadge(text, cls){
+  const b = $("srcBadge");
+  b.textContent = text;
+  b.className = "badge" + (cls ? " " + cls : "");
+}
+
+function simControls(enabled){
+  for (const id of ["btnTrip","btnClose","btnAttack","btnReset"]) $(id).disabled = !enabled;
+}
+
+// Tag -> state. One place, so a firmware tag rename breaks loudly here and
+// nowhere else.
+const APPLY = {
+  voltage_a: v => st.V[0]=v,  voltage_b: v => st.V[1]=v,  voltage_c: v => st.V[2]=v,
+  current_a: v => st.I[0]=v,  current_b: v => st.I[1]=v,  current_c: v => st.I[2]=v,
+  frequency: v => st.freq=v,  power_factor: v => st.pf=v, real_power_kw: v => st.kw=v,
+  transformer_temp: v => st.temp=v,
+  // 1 = closed (normal), 0 = open. Verified against firmware — no inversion.
+  breaker_status: v => st.breakerClosed = (v >= 0.5),
+};
+
+function goLive(host, port, user, pass, board){
+  return new Promise((resolve, reject) => {
+    if (typeof mqtt === "undefined")
+      return reject(new Error("mqtt.js failed to load — offline? The simulator still works."));
+
+    const url = `${location.protocol === "https:" ? "wss" : "ws"}://${host}:${port}`;
+    const c = mqtt.connect(url, {
+      username:user, password:pass, connectTimeout:6000,
+      reconnectPeriod:3000, clientId:"grid-twin-"+Math.random().toString(16).slice(2,8),
+    });
+
+    let settled = false;
+    c.on("connect", () => {
+      live.client = c; live.connected = true;
+      // Subscribe to all boards' status so the feeder picker can populate,
+      // but only one board's telemetry.
+      c.subscribe("grid/+/status");
+      if (board) subscribeBoard(board);
+      if (!settled){ settled = true; resolve(c); }
+    });
+
+    c.on("error", err => {
+      live.connected = false;
+      setBadge("CONNECTION ERROR", "err");
+      if (!settled){ settled = true; c.end(true); reject(err); }
+    });
+
+    c.on("close", () => {
+      live.connected = false;
+      if (live.board) setBadge("RECONNECTING · " + live.board, "stale");
+    });
+
+    c.on("message", (topic, buf) => {
+      const parts = topic.split("/");
+      if (parts.length !== 3 || parts[0] !== "grid") return;
+      const [, short, leaf] = parts;
+
+      // grid/<short>/status is a BARE STRING ("online"/"offline"), retained —
+      // unlike every data tag, which is JSON. Parsing it as JSON throws.
+      if (leaf === "status"){
+        const s = buf.toString().trim();
+        addBoardOption(short, s);
+        if (short === live.board && s === "offline"){
+          live.stale = true;
+          setBadge("OFFLINE · " + short, "offline");
+          document.body.classList.add("stale");
+        }
+        return;
+      }
+      if (short !== live.board) return;
+
+      let v;
+      try { v = JSON.parse(buf.toString()).value; }
+      catch { return; }                       // malformed: drop, don't crash
+      const fn = APPLY[leaf];
+      if (!fn) return;                        // unknown tag: firmware drift
+      fn(Number(v));
+
+      live.lastMsg = Date.now();
+      if (live.stale){
+        live.stale = false;
+        document.body.classList.remove("stale");
+        setBadge("LIVE · " + live.board, "live");
+      }
+      render();
+    });
+  });
+}
+
+function subscribeBoard(short){
+  live.board = short;
+  live.lastMsg = Date.now();
+  live.client.subscribe(`grid/${short}/#`);
+  setBadge("LIVE · " + short, "live");
+  $("srcNote").innerHTML =
+    `Rendering live telemetry from feeder <span class="k">${short}</span>. ` +
+    `Read-only — the twin subscribes and never publishes. ` +
+    `Control commands belong to the fleet manager.`;
+}
+
+function addBoardOption(short, status){
+  const sel = $("dBoard");
+  if ([...sel.options].some(o => o.value === short)) return;
+  if (sel.options[0] && sel.options[0].value === "") sel.remove(0);
+  const o = document.createElement("option");
+  o.value = short; o.textContent = `${short} (${status})`;
+  sel.appendChild(o);
+}
+
+// Staleness: a board that stopped publishing without a clean LWT still looks
+// fine if you just keep rendering its last value. Watch the clock, not the LWT.
+setInterval(() => {
+  if (!live.board || live.stale) return;
+  if (Date.now() - live.lastMsg > STALE_MS){
+    live.stale = true;
+    document.body.classList.add("stale");
+    setBadge("STALE · " + live.board, "stale");
+  }
+}, 1000);
+
+function disconnectLive(){
+  if (live.client){ live.client.end(true); live.client = null; }
+  live.board = null; live.connected = false; live.stale = false;
+  document.body.classList.remove("stale");
+  $("btnDisc").style.display = "none";
+  setBadge("SIMULATED · no hardware required", "");
+  $("srcNote").innerHTML =
+    "Running the built-in simulator — the firmware physics, ported. " +
+    "Connect to the fleet to render a real board's telemetry instead.";
+  simControls(true);
+  startSim();
+}
+
+// -- dialog wiring --
+const dlg = $("dlg");
+$("btnLive").onclick = () => { $("dMsg").textContent = ""; $("dMsg").className = "dlg-msg"; dlg.showModal(); };
+$("dCancel").onclick = () => dlg.close();
+$("btnSim").onclick  = () => disconnectLive();
+$("btnDisc").onclick = () => disconnectLive();
+
+$("dGo").onclick = async () => {
+  const msg = $("dMsg");
+  const host = $("dHost").value.trim(), port = $("dPort").value.trim();
+  const user = $("dUser").value.trim(), pass = $("dPass").value;
+  if (!host || !port){ msg.textContent = "Broker host and port are required."; msg.className="dlg-msg bad"; return; }
+
+  msg.textContent = "Connecting…"; msg.className = "dlg-msg";
+  try {
+    await goLive(host, port, user, pass, null);
+    msg.textContent = "Connected. Discovering feeders…"; msg.className = "dlg-msg good";
+
+    // Retained status messages arrive almost immediately; give them a beat.
+    setTimeout(() => {
+      const sel = $("dBoard");
+      const opts = [...sel.options].filter(o => o.value);
+      if (!opts.length){
+        msg.textContent = "Connected, but no feeders are publishing on grid/+/status.";
+        msg.className = "dlg-msg bad";
+        return;
+      }
+      const chosen = sel.value || opts[0].value;
+      stopSim();
+      simControls(false);          // live data is not ours to actuate
+      subscribeBoard(chosen);
+      $("btnDisc").style.display = "";
+      dlg.close();
+    }, 900);
+  } catch (e) {
+    msg.textContent = "Failed: " + (e.message || e) +
+      "  — check the broker has a websockets listener on this port.";
+    msg.className = "dlg-msg bad";
+  }
+};
+
+updatePhysics(); render();
+startSim();
+</script>
+</body>
+</html>

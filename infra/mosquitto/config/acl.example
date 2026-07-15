@@ -1,0 +1,39 @@
+# Mosquitto ACL -- copy to `acl` (gitignored) and adjust.
+#
+#   cp acl.example acl && docker restart mosquitto
+#
+# THIS FILE IS DEFAULT-DENY. A missing rule is not an error -- the broker
+# silently declines to deliver. That failure mode has bitten this lab once
+# already: `esp32-field` had write rules but no `topic read cmd/#`, so every
+# breaker command published cleanly, returned success, and was never
+# delivered. Nothing logged on either end. See docs/adr/0003-command-topic-scheme.md
+#
+# Principle: the ACL mirrors only what is live. Expanding it preemptively
+# widens blast radius if a field credential leaks. Add rules as roles ship.
+
+# ---- field devices (all six boards connect as this identity) ----
+user esp32-field
+# telemetry up: grid/<short>/<tag> and grid/<short>/status
+topic write grid/#
+# commands down: firmware subscribes cmd/<short>/# and cmd/all/#
+# REQUIRED -- without this, commands silently never arrive.
+topic read cmd/#
+
+# ---- historian / monitoring / twin / fleet manager (read path) ----
+user monitor-reader
+topic read #
+
+# ---- supervisory control (fleet manager command path, Ignition) ----
+user scada-server
+topic readwrite #
+
+# ---- Topic roots reserved for roles that are not live yet. ----
+# Intentionally NOT granted. Uncomment per role as its physics ships and is
+# validated on hardware -- not before.
+# topic write dc/substation/#
+# topic write water/#
+# topic write bms/#
+# topic write dc/power/#
+# topic write dc/cooling/#
+# topic write dc/env/#
+# topic write pipeline/#
