@@ -72,6 +72,17 @@ services:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
       GF_USERS_ALLOW_SIGN_UP: "false"
+      # Grafana expands ${VAR} in its OWN provisioning files (see
+      # grafana/provisioning/datasources/influxdb.yml) by reading its OWN
+      # process environment at startup -- a separate mechanism from
+      # docker-compose's .env substitution above, which only fills in the
+      # compose FILE itself. Without these three, the datasource provisions
+      # with a broken org/bucket/token and every dashboard panel errors on a
+      # fresh clone. Caught in review before anyone hit it -- see
+      # docs/adr/0010-grafana-env-passthrough.md
+      INFLUX_ORG: ${INFLUX_ORG}
+      INFLUX_BUCKET: ${INFLUX_BUCKET}
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
     volumes:
       - ./data/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
