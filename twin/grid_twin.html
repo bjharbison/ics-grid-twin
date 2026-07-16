@@ -260,6 +260,12 @@
           <div id="qBackendPanel">
             <div class="field-lbl">Backend base · same origin</div>
             <input class="field" id="beBase" value="/api/replay" spellcheck="false"/>
+            <div class="note" style="color:var(--warn,#e8b23d)">
+              ⚠ No backend implementing this endpoint ships in this repo yet — this
+              is the intended production path (documented above), not a built one.
+              Use <b>Paste CSV</b> or <b>Influx direct</b> until a proxy exists. See
+              docs/SAFETY.md open items.
+            </div>
           </div>
           <div id="qDirectPanel" style="display:none">
             <div class="field-lbl">InfluxDB URL</div>

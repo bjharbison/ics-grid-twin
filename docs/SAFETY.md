@@ -26,6 +26,8 @@ portfolio point.
 | 11 | The twin can observe but never actuate | Twin subscribes only; zero `.publish()` calls; sim controls disabled while live; connects as `monitor-reader` | `verify_physics.py` read-only check | ✅ Enforced |
 | 12 | Stale data is never rendered as live | Wall-clock staleness watchdog (5 missed intervals) + LWT `offline` handling; stale state visibly desaturates and greys the model | `twin/grid_twin.html` staleness interval; `body.stale` CSS | ✅ Enforced |
 | 15 | The mock fleet cannot drift from firmware | Sim asserts firmware tag names, per-board topics, `1 = closed`, no timestamp, physics constants, and voltage-holds-on-trip | `verify_physics.py` mock-fleet block; CI `invariants` job; ADR-0009 | ✅ Enforced |
+| 18 | The twin never bleeds one feeder's data into another's view | Telemetry filtered to the selected board; switching feeders forces stale-until-fresh rather than showing stale/mixed values under a new label | `verify_physics.py` multi-feeder block; ADR-0011 | ✅ Enforced |
+| 17 | A fresh clone's compose stack actually comes up clean | Every container that self-provisions from `${VAR}` files receives those vars in its own environment block, not just at the compose-file level | ADR-0010; manual trace of grafana/bridge/influxdb env wiring | ✅ Fixed |
 | 16 | Invariants are checked on every push, not just locally | GitHub Actions: gitleaks over full history, assert-no-secret-files-tracked, invariant suite, config sanity, twin JS parse | `.github/workflows/ci.yml` | ✅ Enforced |
 | 14 | Dependencies actually run as pinned | All MQTT clients go through a `make_client()` factory compatible with paho 1.x and 2.x; no bare constructors | `verify_physics.py` paho checks; ADR-0008 | ✅ Enforced |
 | 13 | Live credentials are never persisted by the twin | Entered per-tab in a dialog, held in memory only; no localStorage, no config file, no query param | `verify_physics.py` storage check | ✅ Enforced |
@@ -41,6 +43,13 @@ cat infra/mosquitto/config/acl.example         # invariant 4
 
 ## Open items (tracked honestly)
 
+* **Twin's "backend proxy" InfluxDB replay path has no backend.** The twin's
+  Replay > Query > Twin backend tab documents fetching `/api/replay` (the
+  intended production path — keeps the token server-side, dodges CORS) but no
+  service implementing that endpoint ships in this repo. Defaults to Paste CSV
+  (works today, zero infra) and the twin now warns inline if a user drills into
+  the unimplemented tab, rather than showing a bare network error. Building the
+  actual proxy is a V2 item.
 * **#2 rotation** — do before first public push. Independent of the scrub.
 * **#8 IPv6** — remains Open until Loop 4 lands and a global-unicast v6 probe of
   the OT segment comes back empty. This is the most important open item and is
