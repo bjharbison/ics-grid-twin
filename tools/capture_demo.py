@@ -146,14 +146,19 @@ def main() -> int:
             # Must land before any page script -- this is why init_script, not evaluate.
             page.add_init_script(SEED_SCRIPT % args.seed)
             page.goto(TWIN.as_uri())
-            page.wait_for_selector("#btnAttack")
+            page.wait_for_selector("#tripBtn")
 
             # Fonts + first physics tick.
             page.wait_for_timeout(int(SETTLE_S * 1000))
 
-            target = page.locator("body") if args.full_page else page.locator(".panel").first
+            # .stage holds both the SVG (2.5D) and three.js (3D) views and is
+            # present regardless of which mode is active -- the file defaults
+            # to 2.5D on load, which is what this captures.
+            target = page.locator("body") if args.full_page else page.locator(".stage").first
             interval = 1.0 / args.fps
             lead_frames = round(LEAD_S * args.fps)
+            open_frames = round((RECORD_S * 0.6) * args.fps)
+            recover_frames = round((RECORD_S * 0.4) * args.fps)
             n = 0
 
             print("  recording normal operation…")
@@ -162,10 +167,20 @@ def main() -> int:
                 n += 1
                 page.wait_for_timeout(int(interval * 1000))
 
-            print("  firing Industroyer scenario…")
-            page.click("#btnAttack")
+            print("  tripping the breaker (Industroyer signature)…")
+            page.click("#tripBtn")
 
-            for i in range(total_frames - lead_frames):
+            for i in range(open_frames):
+                target.screenshot(path=str(frame_dir / f"f_{n:04d}.png"))
+                n += 1
+                page.wait_for_timeout(int(interval * 1000))
+
+            # Restore so the GIF loops back to its starting state cleanly,
+            # rather than ending mid-alarm and jump-cutting on repeat.
+            print("  reclosing breaker for a clean loop…")
+            page.click("#restoreBtn")
+
+            for i in range(recover_frames):
                 target.screenshot(path=str(frame_dir / f"f_{n:04d}.png"))
                 n += 1
                 page.wait_for_timeout(int(interval * 1000))

@@ -1,649 +1,1133 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Grid Substation Twin — 12.47 kV Distribution Feeder</title>
-<!--
-  grid_twin.html — digital twin of one 12.47 kV distribution feeder bay.
-
-  RUNS WITH NO HARDWARE. The physics below is a line-by-line port of
-  universal_field.ino updatePhysics() (FW 1.0.0-grid). Same constants, same
-  coupling, same tick interval. That is deliberate: the twin is validated
-  against firmware ground truth rather than inventing a plausible-looking
-  model of its own.
-
-  THE POINT OF THIS FILE
-  Opening the breaker collapses feeder CURRENT and REAL POWER while bus
-  VOLTAGE HOLDS. That is the Industroyer / 2016 Ukraine signature. It is not
-  a blackout — a twin that renders breaker-open as total de-energization is
-  showing you something that did not happen. Watch the bus stay amber.
-
-  LIVE DATA: see the MQTT section at the bottom of this script. One function
-  swaps the simulator for live telemetry; nothing else changes.
--->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<!-- mqtt.js: only needed for the live path. If it fails to load (offline), the
-     simulator still runs -- the twin never hard-depends on the network. -->
-<script src="https://unpkg.com/mqtt@5.7.0/dist/mqtt.min.js"></script>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Grid Substation Twin — grid-substation-01</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="lib/twin3d-kit.js"></script>
 <style>
   :root{
-    --bg:#0A0E14; --panel:#121821; --panel-2:#161E2A; --line:#243044;
-    --txt:#C9D6E5; --dim:#6B7C93; --faint:#3A4759;
-    --pa:#E8A33D; --pb:#3DB8E8; --pc:#D93DE8;
-    --ok:#2AA198; --warn:#B58900; --alarm:#DC322F; --dead:#3E4A5C;
+    --bg:#0a0e14; --panel:#0f151e; --panel-2:#131b26; --line:#1e2a3a;
+    --ink:#dbe6f2; --ink-dim:#7d8da0; --ink-faint:#4a5768;
+    --phase-a:#f2a63b;  /* amber  */
+    --phase-b:#3bd6f2;  /* cyan   */
+    --phase-c:#e04ff2;  /* magenta*/
+    --teal:#2fd4c4; --warn:#f2c53b; --red:#ff4d5e; --ok:#4fe08a;
+    --glow:rgba(59,214,242,.14);
   }
-  *{box-sizing:border-box;margin:0;padding:0}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
   body{
-    background:var(--bg); color:var(--txt);
-    font-family:'IBM Plex Mono',ui-monospace,Menlo,monospace;
-    font-size:13px; line-height:1.5;
-    padding:18px; min-height:100vh;
+    background:
+      radial-gradient(1100px 600px at 78% -10%, rgba(59,214,242,.06), transparent 60%),
+      radial-gradient(900px 500px at 10% 110%, rgba(224,79,242,.05), transparent 60%),
+      var(--bg);
+    color:var(--ink); font-family:"Space Grotesk",system-ui,sans-serif;
+    height:100vh; overflow:hidden;
   }
-  h1,h2,.disp{font-family:'Space Grotesk',system-ui,sans-serif}
+  .app{display:grid; grid-template-columns:1fr 340px; grid-template-rows:auto 1fr; height:100vh}
 
-  header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
-    border-bottom:1px solid var(--line);padding-bottom:12px;margin-bottom:16px}
-  h1{font-size:19px;font-weight:700;letter-spacing:-.01em}
-  .sub{color:var(--dim);font-size:12px}
-  .badge{margin-left:auto;font-size:11px;padding:4px 9px;border:1px solid var(--warn);
-    color:var(--warn);border-radius:2px;letter-spacing:.04em}
-  .badge.live{border-color:var(--ok);color:var(--ok)}
-
-  .grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,1fr);gap:16px}
-  @media(max-width:900px){.grid{grid-template-columns:1fr}}
-
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:14px}
-  .panel h2{font-size:11px;font-weight:500;color:var(--dim);letter-spacing:.12em;
-    text-transform:uppercase;margin-bottom:12px}
-
-  svg{width:100%;height:auto;display:block}
-  .cond{stroke-width:3;fill:none;transition:stroke .45s ease,opacity .45s ease}
-  .live-c{stroke:var(--pa)} .dead-c{stroke:var(--dead)}
-  .flow{stroke-width:3;fill:none;stroke-dasharray:5 9;stroke-linecap:round}
-  .lbl{font:500 10px 'IBM Plex Mono',monospace;fill:var(--dim);letter-spacing:.06em}
-  .val{font:600 12px 'IBM Plex Mono',monospace;fill:var(--txt)}
-
-  table{width:100%;border-collapse:collapse;font-size:12px}
-  th{text-align:left;font-weight:500;color:var(--dim);font-size:10px;letter-spacing:.08em;
-    text-transform:uppercase;padding:5px 4px;border-bottom:1px solid var(--line)}
-  td{padding:5px 4px;border-bottom:1px solid rgba(36,48,68,.45);font-variant-numeric:tabular-nums}
-  td.n{text-align:right;font-weight:500}
-  .ta{color:var(--pa)}.tb{color:var(--pb)}.tc{color:var(--pc)}
-  .prov{color:var(--faint);font-size:9px;letter-spacing:.05em}
-
-  .ctl{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px}
-  button{font-family:inherit;font-size:11px;padding:7px 11px;background:var(--panel-2);
-    color:var(--txt);border:1px solid var(--line);border-radius:2px;cursor:pointer;
-    letter-spacing:.04em;transition:border-color .15s,color .15s}
-  button:hover{border-color:var(--dim)}
-  button:focus-visible{outline:2px solid var(--pb);outline-offset:2px}
-  button.danger:hover{border-color:var(--alarm);color:var(--alarm)}
-  button[disabled]{opacity:.35;cursor:not-allowed}
-
-  .alarm-bar{background:rgba(220,50,47,.11);border:1px solid var(--alarm);color:var(--alarm);
-    padding:9px 11px;border-radius:2px;margin-bottom:12px;font-size:11px;display:none}
-  .alarm-bar.on{display:block;animation:pulse 1.6s ease-in-out infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.62}}
-
-  .note{color:var(--dim);font-size:11px;margin-top:10px;line-height:1.65}
-  .k{color:var(--pa)}
-
-  .badge.stale{border-color:var(--warn);color:var(--warn)}
-  .badge.offline{border-color:var(--dead);color:var(--dim)}
-  .badge.err{border-color:var(--alarm);color:var(--alarm)}
-
-  /* stale/offline must read as visually distinct -- never freeze at the last
-     value as though it were live */
-  body.stale .val,body.stale td.n{opacity:.4;transition:opacity .3s}
-  body.stale .cond{stroke:var(--dead)!important}
-  body.stale .flow{opacity:0!important;animation:none!important}
-
-  dialog{background:var(--panel);border:1px solid var(--line);border-radius:3px;
-    color:var(--txt);padding:18px;width:min(400px,92vw);font-family:inherit;font-size:12px}
-  dialog::backdrop{background:rgba(5,8,12,.78)}
-  dialog h3{font-family:'Space Grotesk',sans-serif;font-size:14px;margin-bottom:4px}
-  .fld{display:block;margin:10px 0 3px;color:var(--dim);font-size:10px;
-    letter-spacing:.08em;text-transform:uppercase}
-  input,select{width:100%;padding:6px 8px;background:var(--bg);color:var(--txt);
-    border:1px solid var(--line);border-radius:2px;font-family:inherit;font-size:12px}
-  input:focus,select:focus{outline:none;border-color:var(--pb)}
-  .dlg-msg{margin-top:10px;font-size:11px;min-height:15px;color:var(--dim)}
-  .dlg-msg.bad{color:var(--alarm)}
-  .dlg-msg.good{color:var(--ok)}
-  @media(prefers-reduced-motion:reduce){
-    *{animation:none!important;transition:none!important}
-    .flow{stroke-dasharray:none}
+  /* ---- top bar ---- */
+  header{
+    grid-column:1/3; display:flex; align-items:center; gap:18px;
+    padding:12px 20px; border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,rgba(19,27,38,.9),rgba(15,21,30,.7));
+    backdrop-filter:blur(6px);
   }
+  .brand{display:flex; flex-direction:column; line-height:1.05}
+  .brand .id{font-weight:700; font-size:15px; letter-spacing:.3px}
+  .brand .sub{font-family:"IBM Plex Mono",monospace; font-size:10.5px; color:var(--ink-dim); letter-spacing:.5px; text-transform:uppercase}
+  .spacer{flex:1}
+  .pill{
+    font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.6px;
+    padding:5px 10px; border:1px solid var(--line); border-radius:20px; color:var(--ink-dim);
+    display:flex; align-items:center; gap:7px; text-transform:uppercase;
+  }
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok)}
+  .dot.sim{background:var(--warn);box-shadow:0 0 10px var(--warn)}
+
+  /* mode toggle */
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{
+    font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.6px;
+    background:transparent; color:var(--ink-dim); border:0; padding:8px 14px; cursor:pointer;
+    text-transform:uppercase; transition:.15s;
+  }
+  .seg button.active{background:var(--phase-b);color:#04121a;font-weight:600}
+  .seg button:not(.active):hover{color:var(--ink);background:var(--panel-2)}
+
+  /* ---- stage ---- */
+  .stage{position:relative; overflow:hidden; background:var(--bg)}
+  #svgWrap,#glWrap{position:absolute; inset:0}
+  #glWrap{display:none}
+  #svgWrap svg{width:100%;height:100%;display:block}
+  .hint{
+    position:absolute; left:16px; bottom:14px; font-family:"IBM Plex Mono",monospace;
+    font-size:10.5px; color:var(--ink-faint); letter-spacing:.4px; pointer-events:none;
+  }
+  /* 3D navigation pad */
+  .navpad{position:absolute; right:16px; bottom:14px; display:none; flex-direction:column; gap:7px; align-items:flex-end}
+  .navpad.on{display:flex}
+  .navrow{display:flex; gap:6px}
+  .navpad button{
+    font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.5px;
+    min-width:34px; height:30px; padding:0 8px; cursor:pointer; color:var(--ink-dim);
+    background:rgba(15,21,30,.82); border:1px solid var(--line); border-radius:7px;
+    backdrop-filter:blur(6px); transition:.12s;
+  }
+  .navpad button:hover{color:var(--ink); border-color:var(--phase-b); background:rgba(19,27,38,.92)}
+  .navpad button:active{transform:translateY(1px)}
+  .navpad button.wide{min-width:52px}
+
+  /* signature banner */
+  .sig{
+    position:absolute; top:16px; left:50%; transform:translateX(-50%) translateY(-20px);
+    background:rgba(255,77,94,.09); border:1px solid rgba(255,77,94,.5);
+    border-radius:10px; padding:10px 16px; max-width:560px;
+    opacity:0; transition:.35s; pointer-events:none; text-align:center;
+  }
+  .sig.on{opacity:1; transform:translateX(-50%) translateY(0)}
+  .sig .t{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:1px; color:var(--red); text-transform:uppercase; font-weight:600}
+  .sig .d{font-size:12.5px; color:var(--ink); margin-top:4px; line-height:1.35}
+  .sig .d b{color:var(--red)} .sig .d i{color:var(--teal);font-style:normal;font-weight:600}
+
+  /* ---- side rail ---- */
+  aside{border-left:1px solid var(--line); background:linear-gradient(180deg,var(--panel),var(--panel-2)); overflow-y:auto}
+  .block{padding:16px 18px; border-bottom:1px solid var(--line)}
+  .block h3{
+    margin:0 0 12px; font-family:"IBM Plex Mono",monospace; font-size:10.5px;
+    letter-spacing:1.4px; color:var(--ink-dim); text-transform:uppercase; font-weight:600;
+    display:flex;align-items:center;gap:8px;
+  }
+  .block h3::before{content:"";width:14px;height:1px;background:var(--phase-b);display:inline-block}
+
+  /* tag table */
+  table{width:100%; border-collapse:collapse; font-family:"IBM Plex Mono",monospace}
+  td{padding:5px 0; font-size:12px; border-bottom:1px solid rgba(30,42,58,.5)}
+  td.k{color:var(--ink-dim); letter-spacing:.3px}
+  td.v{text-align:right; color:var(--ink); font-weight:500}
+  td.v .u{color:var(--ink-faint); font-size:10px; margin-left:3px}
+  tr.pa td.k::before{content:"";display:inline-block;width:7px;height:7px;border-radius:2px;background:var(--phase-a);margin-right:7px;vertical-align:middle}
+  tr.pb td.k::before{content:"";display:inline-block;width:7px;height:7px;border-radius:2px;background:var(--phase-b);margin-right:7px;vertical-align:middle}
+  tr.pc td.k::before{content:"";display:inline-block;width:7px;height:7px;border-radius:2px;background:var(--phase-c);margin-right:7px;vertical-align:middle}
+  td.v.warn{color:var(--warn)} td.v.red{color:var(--red)} td.v.collapse{color:var(--red)}
+
+  /* controls */
+  .row{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .row label{font-size:12px;color:var(--ink-dim)}
+  .val{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--teal)}
+  input[type=range]{-webkit-appearance:none;width:100%;height:3px;border-radius:3px;background:var(--line);outline:none;margin:2px 0 14px}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:15px;height:15px;border-radius:50%;background:var(--phase-b);cursor:pointer;box-shadow:0 0 8px var(--glow)}
+  input[type=range]:disabled::-webkit-slider-thumb{background:var(--ink-faint);box-shadow:none;cursor:not-allowed}
+
+  .chk{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--ink-dim);cursor:pointer;margin-bottom:14px}
+  .chk input{accent-color:var(--phase-b);width:14px;height:14px;cursor:pointer}
+
+  .breaker-state{
+    font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:1px;
+    padding:4px 10px;border-radius:6px;text-transform:uppercase;font-weight:600;
+  }
+  .breaker-state.closed{color:var(--ok);border:1px solid rgba(79,224,138,.4);background:rgba(79,224,138,.07)}
+  .breaker-state.open{color:var(--red);border:1px solid rgba(255,77,94,.4);background:rgba(255,77,94,.07)}
+
+  .btn{
+    width:100%;font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.8px;
+    padding:11px;border-radius:8px;cursor:pointer;text-transform:uppercase;font-weight:600;transition:.15s;
+    border:1px solid var(--line);background:var(--panel-2);color:var(--ink);
+  }
+  .btn:hover{border-color:var(--ink-dim)}
+  .btn.trip{border-color:rgba(255,77,94,.45);color:var(--red);background:rgba(255,77,94,.06);margin-top:2px}
+  .btn.trip:hover{background:rgba(255,77,94,.13)}
+  .btn.restore{border-color:rgba(79,224,138,.4);color:var(--ok);background:rgba(79,224,138,.06)}
+  .btn.restore:hover{background:rgba(79,224,138,.12)}
+
+  .note{font-size:11px;color:var(--ink-faint);line-height:1.5;margin-top:10px}
+  .field{width:100%;font-family:"IBM Plex Mono",monospace;font-size:11.5px;padding:8px 10px;margin-bottom:8px;background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--ink);outline:none}
+  .field:focus{border-color:var(--phase-b)}
+  .field:disabled{opacity:.5;cursor:not-allowed}
+  .field-lbl{font-size:10.5px;color:var(--ink-dim);letter-spacing:.4px;margin:2px 0 4px;font-family:"IBM Plex Mono",monospace;text-transform:uppercase}
+  .conn-msg{font-family:"IBM Plex Mono",monospace;font-size:10.5px;margin-top:9px;color:var(--ink-dim);letter-spacing:.3px;line-height:1.45}
+  .conn-msg.ok{color:var(--ok)} .conn-msg.err{color:var(--red)} .conn-msg.wait{color:var(--warn)}
+  .seg.src{width:100%} .seg.src button{flex:1}
+  .seg.src.sub button{font-size:10px;padding:7px 10px}
+  .ta{min-height:96px;resize:vertical;line-height:1.4}
+  .filein{width:100%;font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:var(--ink-dim);margin:2px 0 4px}
+  .filein::file-selector-button{font-family:inherit;font-size:10.5px;background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:5px 9px;margin-right:8px;cursor:pointer}
+  .note code{font-family:"IBM Plex Mono",monospace;color:var(--ink-dim)}
+
+  ::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px}
+
+  @media (max-width:820px){
+    .app{grid-template-columns:1fr;grid-template-rows:auto 46vh 1fr}
+    aside{border-left:0;border-top:1px solid var(--line)}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <span class="id">GRID SUBSTATION TWIN</span>
+      <span class="sub">grid-substation-01 · 12.47 kV distribution · 11 coupled tags</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="pill" id="freqPill"><span style="color:var(--teal)">f</span> <span id="freqHud">60.00</span> Hz</div>
+    <div class="pill" id="srcPill"><span class="dot sim" id="srcDot"></span> <span id="srcLabel">SIM</span></div>
+    <div class="seg">
+      <button id="mode25" class="active">2.5D · Isometric</button>
+      <button id="mode3d">3D · Yard</button>
+    </div>
+  </header>
 
-<header>
-  <h1>Grid Substation Twin</h1>
-  <span class="sub">12.47 kV distribution · 7.2 kV φ-N · feeder bay</span>
-  <span class="badge" id="srcBadge">SIMULATED · no hardware required</span>
-</header>
-
-<div class="alarm-bar" id="alarmBar"></div>
-
-<div class="grid">
-  <div class="panel">
-    <h2>One-line diagram</h2>
-    <svg viewBox="0 0 640 380" role="img" aria-label="Substation one-line diagram">
-      <!-- incoming source -->
-      <text x="20" y="34" class="lbl">SOURCE 12.47 kV</text>
-      <path id="c-src" class="cond live-c" d="M40 50 L40 96"/>
-      <path id="f-src" class="flow" d="M40 50 L40 96"/>
-
-      <!-- HV bus -->
-      <path id="c-bus" class="cond live-c" d="M40 96 L600 96" stroke-width="5"/>
-      <text x="560" y="86" class="lbl" text-anchor="end">HV BUS</text>
-
-      <!-- transformer -->
-      <path id="c-t1" class="cond live-c" d="M180 96 L180 132"/>
-      <path id="f-t1" class="flow" d="M180 96 L180 132"/>
-      <circle id="xf-a" cx="180" cy="150" r="19" fill="none" stroke="var(--pa)" stroke-width="2.5"/>
-      <circle id="xf-b" cx="180" cy="172" r="19" fill="none" stroke="var(--pa)" stroke-width="2.5"/>
-      <rect id="xf-heat" x="146" y="126" width="68" height="70" rx="3" fill="var(--pa)" opacity="0"/>
-      <text x="228" y="152" class="lbl">TRANSFORMER</text>
-      <text x="228" y="168" class="val" id="tTemp">—</text>
-      <path id="c-t2" class="cond live-c" d="M180 190 L180 226"/>
-      <path id="f-t2" class="flow" d="M180 190 L180 226"/>
-
-      <!-- breaker (IEEE device 52) -->
-      <rect id="brk-box" x="163" y="226" width="34" height="34" rx="2"
-            fill="none" stroke="var(--pa)" stroke-width="2.5"/>
-      <line id="brk-arm" x1="180" y1="226" x2="180" y2="260"
-            stroke="var(--pa)" stroke-width="3" style="transition:all .35s ease"/>
-      <text x="210" y="240" class="lbl">52</text>
-      <text x="210" y="255" class="val" id="brkState">—</text>
-
-      <!-- feeder out -->
-      <path id="c-fdr" class="cond live-c" d="M180 260 L180 330"/>
-      <path id="f-fdr" class="flow" d="M180 260 L180 330"/>
-      <path id="c-load" class="cond live-c" d="M120 330 L240 330"/>
-      <text x="252" y="334" class="lbl">FEEDER LOAD</text>
-      <text x="252" y="350" class="val" id="fdrI">—</text>
-
-      <!-- readouts -->
-      <text x="400" y="150" class="lbl">BUS VOLTAGE φ-N</text>
-      <text x="400" y="172" class="val ta" id="vA">—</text>
-      <text x="400" y="190" class="val tb" id="vB">—</text>
-      <text x="400" y="208" class="val tc" id="vC">—</text>
-      <text x="400" y="244" class="lbl">FEEDER CURRENT</text>
-      <text x="400" y="266" class="val ta" id="iA">—</text>
-      <text x="400" y="284" class="val tb" id="iB">—</text>
-      <text x="400" y="302" class="val tc" id="iC">—</text>
-      <text x="400" y="338" class="lbl">REAL POWER</text>
-      <text x="400" y="358" class="val" id="pKw">—</text>
-    </svg>
+  <div class="stage">
+    <div id="svgWrap"></div>
+    <div id="glWrap"></div>
+    <div class="navpad" id="navpad">
+      <div class="navrow">
+        <button data-view="iso"   title="Isometric">ISO</button>
+        <button data-view="front" title="Front elevation">FRONT</button>
+        <button data-view="top"   title="Plan / top-down">TOP</button>
+        <button data-view="side"  title="Side">SIDE</button>
+      </div>
+      <div class="navrow">
+        <button data-nav="in"  title="Zoom in">＋</button>
+        <button data-nav="out" title="Zoom out">－</button>
+        <button data-nav="rotl" title="Rotate left">↺</button>
+        <button data-nav="rotr" title="Rotate right">↻</button>
+        <button data-nav="center" title="Center model in view">CENTER</button>
+        <button data-nav="reset" title="Reset view" class="wide">RESET</button>
+      </div>
+    </div>
+    <div class="sig" id="sig">
+      <div class="t">Industroyer-style signature detected</div>
+      <div class="d"><b>Current &amp; real power collapsed</b> — but <i>bus voltage is holding</i>. This asymmetry is the tell: a breaker trip, not a source-side outage.</div>
+    </div>
+    <div class="hint" id="hint">Drag to orbit · scroll to zoom</div>
   </div>
 
-  <div>
-    <div class="panel" style="margin-bottom:16px">
-      <h2>Telemetry · 11 tags</h2>
-      <table>
-        <thead><tr><th>Tag</th><th style="text-align:right">Value</th><th style="text-align:right">Unit</th></tr></thead>
-        <tbody id="tags"></tbody>
-      </table>
-      <p class="note">
-        Every tag rides one slow-moving load factor. The load factor itself is
-        <em>never published</em> — the firmware keeps it internal, so anything
-        consuming this feed has to estimate it by inverting the voltage sag.
-        Estimated load: <span class="k" id="loadEst">—</span>
-      </p>
+  <aside>
+    <div class="block">
+      <h3>Data Source</h3>
+      <div class="seg src" style="margin-bottom:4px">
+        <button id="srcSim" class="active">Sim</button>
+        <button id="srcLive">Live</button>
+        <button id="srcReplay">Replay</button>
+      </div>
+      <div id="livePanel" style="display:none;margin-top:12px">
+        <div class="field-lbl">Broker · WebSocket</div>
+        <input class="field" id="wsUrl" value="ws://203.0.113.163:9001" spellcheck="false"/>
+        <div class="field-lbl">Topic root</div>
+        <input class="field" id="topicRoot" value="grid" spellcheck="false"/>
+        <div class="field-lbl">Feeder · discovered from grid/&lt;short&gt;/status</div>
+        <select class="field" id="feederSelect"><option value="">— connect to discover —</option></select>
+        <div class="field-lbl">Username · read-only</div>
+        <input class="field" id="mqUser" value="monitor-reader" spellcheck="false"/>
+        <div class="field-lbl">Password · session only</div>
+        <input class="field" id="mqPass" type="password" placeholder="from Vaultwarden"/>
+        <button class="btn" id="connectBtn" style="margin-top:2px">Connect</button>
+        <div id="connMsg" class="conn-msg">Not connected.</div>
+        <div class="note">
+          Needs a <b>WebSocket listener</b> on Mosquitto — browsers can't reach raw <code>1883</code>. Add to <code>mosquitto.conf</code>:<br>
+          <code>listener 9001</code><br><code>protocol websockets</code><br>
+          Password stays in memory only (never stored). Keep this listener on the LAN / behind the VLAN — don't port-forward it, and mind the ISP IPv6 path. All six boards are flashed and publishing; use the feeder picker below once connected to choose which one this view renders.
+        </div>
+      </div>
+
+      <div id="replayPanel" style="display:none;margin-top:12px">
+        <div class="seg src sub" style="margin-bottom:12px">
+          <button id="acqCsv" class="active">Paste CSV</button>
+          <button id="acqQuery">Query</button>
+        </div>
+
+        <div id="acqCsvPanel">
+          <div class="field-lbl">InfluxDB annotated CSV · export from Grafana / CLI</div>
+          <textarea class="field ta" id="csvBox" spellcheck="false" placeholder="#datatype ...&#10;,result,table,_time,_value,_field,_measurement,device&#10;,,0,2026-07-16T14:00:02Z,7205.3,voltage_a,grid,grid-substation-01"></textarea>
+          <input type="file" id="csvFile" accept=".csv,text/csv" class="filein"/>
+          <button class="btn" id="csvLoadBtn" style="margin-top:8px">Load replay</button>
+          <div class="note">Zero network, no token. Run your Flux in the InfluxDB UI or <code>influx query</code>, export CSV, drop it here. Works today against any board's history.</div>
+        </div>
+
+        <div id="acqQueryPanel" style="display:none">
+          <div class="seg src" style="margin-bottom:10px">
+            <button id="qBackend" class="active">Twin backend</button>
+            <button id="qDirect">Influx direct</button>
+          </div>
+          <div id="qBackendPanel">
+            <div class="field-lbl">Backend base · same origin</div>
+            <input class="field" id="beBase" value="/api/replay" spellcheck="false"/>
+          </div>
+          <div id="qDirectPanel" style="display:none">
+            <div class="field-lbl">InfluxDB URL</div>
+            <input class="field" id="ixUrl" value="http://203.0.113.163:8086" spellcheck="false"/>
+            <div class="field-lbl">Org</div>
+            <input class="field" id="ixOrg" value="ICS Lab" spellcheck="false"/>
+            <div class="field-lbl">Token · session only ⚠ testing</div>
+            <input class="field" id="ixTok" type="password" placeholder="read-scoped token"/>
+          </div>
+          <div class="field-lbl">Measurement · device</div>
+          <input class="field" id="qMeas" value="grid" spellcheck="false"/>
+          <input class="field" id="qDev" value="grid-substation-01" spellcheck="false"/>
+          <div class="field-lbl">Range start · stop</div>
+          <input class="field" id="qStart" value="-30m" spellcheck="false"/>
+          <input class="field" id="qStop" value="now()" spellcheck="false"/>
+          <button class="btn" id="qLoadBtn" style="margin-top:2px">Run query</button>
+          <div id="qMsg" class="conn-msg">Idle.</div>
+          <div class="note">
+            <b>Twin backend</b> keeps the token server-side (Vaultwarden) and dodges CORS — the production path; it forwards the Flux to InfluxDB and returns the CSV. <b>Influx direct</b> hits <code>/api/v2/query</code> from the browser: needs an http-origin page (mixed-content) and InfluxDB CORS, and exposes the token — testing only.
+          </div>
+        </div>
+
+        <div id="transport" style="display:none;margin-top:14px">
+          <div class="row" style="margin-bottom:8px">
+            <button class="btn" id="playBtn" style="width:auto;padding:8px 14px">❚❚ Pause</button>
+            <span class="val" id="tStamp">—</span>
+          </div>
+          <div class="field-lbl">Seek</div>
+          <input type="range" id="scrub" min="0" max="1000" value="0"/>
+          <div class="row"><label>Speed</label><span class="val" id="spVal">1.0×</span></div>
+          <input type="range" id="speed" min="5" max="200" value="10"/>
+          <div class="conn-msg" id="rpMsg">0 points.</div>
+        </div>
+      </div>
     </div>
 
-    <div class="panel" style="margin-bottom:16px">
-      <h2>Data source</h2>
-      <div class="ctl">
-        <button id="btnSim">Use simulator</button>
-        <button id="btnLive">Connect to fleet…</button>
-        <button id="btnDisc" style="display:none">Disconnect</button>
-      </div>
-      <p class="note" id="srcNote">
-        Running the built-in simulator — the firmware physics, ported. Connect to
-        the fleet to render a real board's telemetry instead.
-      </p>
+    <div class="block">
+      <h3>Live Telemetry</h3>
+      <table id="tags"></table>
     </div>
 
-    <div class="panel">
-      <h2>Controls</h2>
-      <div class="ctl">
-        <button id="btnTrip" class="danger">Trip breaker</button>
-        <button id="btnClose">Close breaker</button>
-        <button id="btnAttack" class="danger">Run Industroyer scenario</button>
-        <button id="btnReset">Reset</button>
-      </div>
-      <p class="note">
-        <strong style="color:var(--txt)">Watch the bus, not the breaker.</strong>
-        On trip, feeder current and real power collapse while bus voltage holds
-        steady. The conductor above the breaker stays amber; everything below
-        goes grey. That asymmetry is the detection signal — a total blackout
-        would mean something else entirely happened.
-      </p>
+    <div class="block">
+      <h3>Load Factor</h3>
+      <label class="chk"><input type="checkbox" id="autoLoad" checked/> Auto-walk (latent, never published)</label>
+      <div class="row"><label>Manual load</label><span class="val" id="loadVal">—</span></div>
+      <input type="range" id="loadSlider" min="0" max="100" value="45" disabled/>
+      <div class="note">Every tag rides this one factor. Voltage sags, current rises, transformer heats — all from a single spine, exactly like the firmware.</div>
     </div>
-  </div>
+
+    <div class="block">
+      <h3>Breaker · Attack Surface</h3>
+      <div class="row" style="margin-bottom:14px">
+        <label>breaker_status</label>
+        <span class="breaker-state closed" id="brkState">1 · closed</span>
+      </div>
+      <button class="btn trip" id="tripBtn">⚡ Trip breaker (Industroyer)</button>
+      <button class="btn restore" id="restoreBtn" style="display:none">↺ Reclose breaker</button>
+      <div class="note">Open collapses <code>current_a/b/c</code> and <code>real_power_kw</code>; bus voltage holds; <code>transformer_temp</code> cools along its integrator. Watch the current-flow stop while the buses stay energized.</div>
+    </div>
+
+    <div class="block">
+      <h3>Notes on Live Mode</h3>
+      <div class="note">
+        In live mode every value is the firmware's own — no generation. Load factor is never published, so the readout is <b>estimated</b> from current for coherence only. The parser is topic-depth agnostic (<code>grid/&lt;tag&gt;</code> or <code>grid/&lt;board&gt;/&lt;tag&gt;</code>) and folds any legacy <code>_phase_</code> names back to canonical — resolve the exact shape against your owed <code>mosquitto_sub -t 'grid/#'</code> capture. Historical replay from InfluxDB <code>ics-telemetry</code> is the next source to add behind this same toggle.
+      </div>
+    </div>
+  </aside>
 </div>
 
-<dialog id="dlg">
-  <h3>Connect to fleet</h3>
-  <p style="color:var(--dim);font-size:11px;line-height:1.6">
-    Read-only. Use the <code style="color:var(--pa)">monitor-reader</code> account —
-    the twin only ever subscribes. Credentials are held in memory for this tab and
-    never stored or sent anywhere else.
-  </p>
-
-  <label class="fld" for="dHost">Broker host</label>
-  <input id="dHost" value="203.0.113.163" autocomplete="off">
-
-  <label class="fld" for="dPort">WebSocket port</label>
-  <input id="dPort" value="9001" inputmode="numeric" autocomplete="off">
-
-  <label class="fld" for="dUser">Username</label>
-  <input id="dUser" value="monitor-reader" autocomplete="off">
-
-  <label class="fld" for="dPass">Password</label>
-  <input id="dPass" type="password" autocomplete="off" placeholder="from Vaultwarden">
-
-  <label class="fld" for="dBoard">Feeder</label>
-  <select id="dBoard"><option value="">— discover after connecting —</option></select>
-
-  <p class="dlg-msg" id="dMsg"></p>
-
-  <div class="ctl" style="margin-top:14px">
-    <button id="dGo">Connect</button>
-    <button id="dCancel">Cancel</button>
-  </div>
-</dialog>
-
 <script>
-"use strict";
-/* ==========================================================================
-   PHYSICS — direct port of universal_field.ino updatePhysics()
-   Constants match firmware exactly. Do not "improve" them; they are the
-   contract this twin is validated against.
-   ========================================================================== */
-const TICK_MS = 2000;            // firmware PUBLISH_MS
-const V_NOM = 7250.0, V_SAG = 0.015;
-const I_BASE = 150.0, I_SPAN = 200.0;
-const T_BASE = 45.0,  T_SPAN = 30.0, T_ALPHA = 0.03;
-const XFMR_WARN = 72, XFMR_RED = 80;
-
-// Arduino random(a,b) is [a,b) — integer, upper-exclusive.
-const arnd = (a,b) => Math.floor(Math.random()*(b-a))+a;
-const clamp = (v,lo,hi) => Math.min(hi, Math.max(lo, v));
-
-const st = {
-  loadWalk: 0.60, curLoad: 0.60,
-  V: [0,0,0], I: [0,0,0],
-  freq: 60.00, pf: 0.97, kw: 0, temp: 55.0,
+/* ============================================================
+   SHARED PHYSICS  — one state object, both renderers read it
+   Firmware-faithful (port doc §3):
+     current ≈ 150 + 200·load ,  voltage ≈ 7250·(1 − 0.015·load)
+     breaker 1=closed/normal, 0=open
+     OPEN ⇒ current + real_power collapse, VOLTAGE HOLDS
+     frequency is an INDEPENDENT bounded random walk toward 60.00 Hz —
+       NOT a function of load (an earlier project doc claimed otherwise
+       and was corrected; see ADR-0002). Implemented inline in physics()'s
+       SIM branch, not as a separate function.
+     transformer_temp = first-order thermal integrator
+============================================================ */
+const PHASE = ['a','b','c'];
+const state = {
+  load: 0.45,
+  autoLoad: true,
   breakerClosed: true,
-  boardOffset: 0.0,          // MAC-derived on real hardware; 0 for the sim
-  t0: Date.now(),
+  V: [7200,7200,7200],      // per-phase voltage
+  I: [0,0,0],               // per-phase current
+  freq: 60.0,
+  pf: 0.96,
+  realKw: 0,
+  temp: 58,                 // transformer_temp
+  // per-board MAC-derived offsets (deterministic flavour for grid-substation-01)
+  vOff:[ +18, -12, +4 ],
+  iOff:[ +6,  -9, +3 ],
+  loadWalkVel:0,
+  // ---- data source / live ingest ----
+  source:'sim',            // 'sim' | 'live'
+  online:false,            // device birth/LWT presence
+  lastMsg:0,               // ms of last telemetry message
+  stale:false,             // no fresh telemetry while live
+  rx:{ V:[7200,7200,7200], I:[250,250,250], freq:60.0, pf:0.96, realKw:5100, temp:58, breaker:1 },
+  // ---- fleet: which board this view renders, and who's been seen ----
+  selectedBoard:null,      // board 'short' id currently rendered, or null
+  boards:{},               // short -> {online:bool} — every board seen via status
 };
 
-function updatePhysics(){
-  st.loadWalk = clamp(st.loadWalk + arnd(-20,21)/1000, 0.30, 0.95);
-  const diurnal = 0.10 * Math.sin(((Date.now()-st.t0)/600000) * 6.2832);
-  st.curLoad = clamp(st.loadWalk + diurnal + st.boardOffset, 0.20, 0.99);
+const STALE_MS = 6000;     // no message for this long ⇒ stale
 
-  // NOTE the asymmetry — this single line is the whole demo:
-  // voltage sags against curLoad, current is driven by ld. Open the breaker
-  // and ld goes to zero while curLoad keeps walking. Voltage therefore HOLDS.
-  const ld = st.breakerClosed ? st.curLoad : 0.0;
+function targetCurrent(load, p){ return state.breakerClosed ? (150 + 200*load + state.iOff[p]) : 0; }
+function targetVoltage(load, p){ return 7250*(1 - 0.015*load) + state.vOff[p]; } // holds regardless of breaker
+// Firmware treats frequency as an INDEPENDENT bounded random walk pulled
+// toward 60.00 Hz -- NOT a function of load. An earlier project doc claimed
+// otherwise and was corrected (see ADR-0002 in the repo); a load-coupled
+// targetFreq() here would silently reintroduce that same error. See the SIM
+// branch of physics() below for the actual bounded-walk implementation.
+function targetPF(load){ return clamp(0.985 - 0.06*load, 0.90, 0.995); } // matches firmware exactly
+// Firmware target is LOAD-based (45 + 30*ld), gated by breaker state so it
+// cools to ambient on a trip -- not current-based. A current-based version
+// of this was caught during the 2.5D/3D merge: it reached 85°C at full
+// NORMAL load (breaker closed), exceeding the documented 80°C alarm
+// threshold under completely benign conditions -- contradicting the
+// established "red band is unreachable from load alone" claim (ADR-0002).
+function tempSS(){ const ld = state.breakerClosed ? state.load : 0; return 45 + 30*clamp(ld,0,1); }
 
-  for (let i=0;i<3;i++){
-    const imb = 1.0 + ((i-1)*0.004);
-    st.V[i] = (V_NOM*(1.0 - V_SAG*st.curLoad))*imb + arnd(-30,31);
-    st.I[i] = st.breakerClosed
-      ? (I_BASE + I_SPAN*ld)*imb + arnd(-8,9)
-      : arnd(0,3);
+function clamp(x,a,b){return Math.max(a,Math.min(b,x));}
+let noiseT=0;
+function n(a){ noiseT+=0.0007; return (Math.sin(noiseT*13.1+a)*0.5+Math.sin(noiseT*7.7+a*2)*0.5)*0.5; }
+
+function physics(dt){
+  if(state.source==='replay'){ replayStep(dt); liveEase(dt); return; }
+  if(state.source==='live'){ liveEase(dt); return; }
+  // ===================== SIMULATOR =====================
+  // latent load: slow random walk (autonomous) or manual
+  if(state.autoLoad){
+    state.loadWalkVel += (Math.random()-0.5)*0.06*dt;
+    state.loadWalkVel = clamp(state.loadWalkVel,-0.04,0.04);
+    state.load = clamp(state.load + state.loadWalkVel*dt*0.9 + (0.5-state.load)*0.002*dt, 0.05, 1);
   }
-
-  // Frequency is a bounded random walk pulled to nominal. It is NOT coupled
-  // to load in FW 1.0.0-grid, despite what earlier specs claimed. See ADR-0002.
-  st.freq = clamp(st.freq + arnd(-4,5)/1000 + (60.00 - st.freq)*0.05, 59.95, 60.05);
-
-  st.pf = clamp(0.985 - 0.06*ld + arnd(-5,6)/1000, 0.90, 0.995);
-  const pSum = st.V[0]*st.I[0] + st.V[1]*st.I[1] + st.V[2]*st.I[2];
-  st.kw = (pSum * st.pf)/1000.0;
-
-  // First-order thermal integrator. tau ~= TICK/alpha ~= 66 s.
-  // Ceiling is T_BASE + T_SPAN*0.99 ~= 74.7 C, so the 80 C red band is NOT
-  // reachable from load alone — an overload demo needs injection.
-  st.temp += ((T_BASE + T_SPAN*ld) - st.temp) * T_ALPHA;
+  // fast-tracking analog tags toward targets (current collapses quickly on trip)
+  const kI = state.breakerClosed ? 3.0 : 4.5;
+  for(let p=0;p<3;p++){
+    const vt = targetVoltage(state.load,p) + n(p)*10;
+    const it = targetCurrent(state.load,p) + (state.breakerClosed? n(p+5)*6 : 0);
+    state.V[p] += (vt-state.V[p])*Math.min(1, 2.4*dt);
+    state.I[p] += (it-state.I[p])*Math.min(1, kI*dt);
+  }
+  state.freq += (Math.random()-0.5)*0.008 + (60.00 - state.freq)*0.05;
+  state.freq = clamp(state.freq, 59.95, 60.05);
+  state.pf   += (targetPF(state.load) - state.pf)*Math.min(1,2*dt);
+  // real power = Σ V·I·PF  (kW)
+  let p3=0; for(let p=0;p<3;p++) p3 += state.V[p]*state.I[p]*state.pf;
+  state.realKw += (p3/1000 - state.realKw)*Math.min(1,3*dt);
+  // thermal integrator — the showcase lag (τ ≈ 9s sim so it's visible)
+  const tau=9; state.temp += (tempSS()-state.temp)/tau*dt;
 }
 
-/* ==========================================================================
-   RENDER
-   ========================================================================== */
-const $ = id => document.getElementById(id);
-const TAGS = [
-  ["voltage_a","V",()=>st.V[0],0,"ta"], ["voltage_b","V",()=>st.V[1],0,"tb"],
-  ["voltage_c","V",()=>st.V[2],0,"tc"],
-  ["current_a","A",()=>st.I[0],0,"ta"], ["current_b","A",()=>st.I[1],0,"tb"],
-  ["current_c","A",()=>st.I[2],0,"tc"],
-  ["frequency","Hz",()=>st.freq,3,""], ["power_factor","",()=>st.pf,3,""],
-  ["real_power_kw","kW",()=>st.kw,0,""], ["transformer_temp","°C",()=>st.temp,1,""],
-  ["breaker_status","",()=>st.breakerClosed?1:0,0,""],
-];
-
-$("tags").innerHTML = TAGS.map(([n,u,,,c])=>
-  `<tr><td>${n}</td><td class="n ${c}" id="tg-${n}">—</td><td class="n prov">${u}</td></tr>`
-).join("");
-
-// Load estimator — inverts the firmware's voltage sag. Voltage is the right
-// basis, not current: current reads zero on an open breaker, voltage doesn't.
-function estimateLoad(){
-  const vAvg = (st.V[0]+st.V[1]+st.V[2])/3;
-  return clamp((1.0 - vAvg/V_NOM)/V_SAG, 0, 1);
+// ===================== LIVE =====================
+// Ease displayed state toward last-received values (rx). No generation:
+// every field here is whatever the firmware actually published. Breaker,
+// load-readout, and staleness all derive from the wire, not from us.
+function liveEase(dt){
+  const rx=state.rx;
+  for(let p=0;p<3;p++){
+    state.V[p] += (rx.V[p]-state.V[p])*Math.min(1,2.4*dt);
+    state.I[p] += (rx.I[p]-state.I[p])*Math.min(1,3.0*dt);
+  }
+  state.freq  += (rx.freq -state.freq )*Math.min(1,2*dt);
+  state.pf    += (rx.pf   -state.pf   )*Math.min(1,2*dt);
+  state.realKw+= (rx.realKw-state.realKw)*Math.min(1,3*dt);
+  state.temp  += (rx.temp -state.temp )*Math.min(1,1.5*dt);
+  state.breakerClosed = rx.breaker>=0.5;
+  // Load is latent/never published, so it must be ESTIMATED for the HUD
+  // readout only. Basis matters: current collapses to ~0 on a breaker trip,
+  // so a current-based estimate would read "zero load" during the exact
+  // event this twin exists to demo. Voltage sags under load but HOLDS
+  // through a trip (see targetVoltage/liveEase above), so inverting the
+  // voltage sag stays correct in both breaker states. Matches the repo's
+  // other twin build and firmware's actual coupling (V ≈ 7250·(1−0.015·load)).
+  const vAvg=(rx.V[0]+rx.V[1]+rx.V[2])/3;
+  state.load = clamp((1 - vAvg/7250)/0.015, 0, 1);
+  state.stale = (state.source==='live') && (performance.now()-state.lastMsg) > STALE_MS;
 }
 
-const flows = ["f-src","f-t1","f-t2","f-fdr"].map($);
-const deadables = ["c-t2","c-fdr","c-load"].map($);
+/* ---------- HUD ---------- */
+const tagsTbl=document.getElementById('tags');
+function tempClass(t){ return t>=80?'red': t>=70?'warn':''; }
+function row(cls,k,v,u,vc=''){ return `<tr class="${cls}"><td class="k">${k}</td><td class="v ${vc}">${v}<span class="u">${u}</span></td></tr>`; }
+function renderHUD(){
+  const collapsed = !state.breakerClosed;
+  let h='';
+  h+=row('pa','voltage_a', state.V[0].toFixed(0),'V');
+  h+=row('pb','voltage_b', state.V[1].toFixed(0),'V');
+  h+=row('pc','voltage_c', state.V[2].toFixed(0),'V');
+  h+=row('pa','current_a', state.I[0].toFixed(1),'A', collapsed?'collapse':'');
+  h+=row('pb','current_b', state.I[1].toFixed(1),'A', collapsed?'collapse':'');
+  h+=row('pc','current_c', state.I[2].toFixed(1),'A', collapsed?'collapse':'');
+  h+=row('','frequency', state.freq.toFixed(3),'Hz');
+  h+=row('','power_factor', state.pf.toFixed(3),'');
+  h+=row('','real_power_kw', state.realKw.toFixed(0),'kW', collapsed?'collapse':'');
+  h+=row('','transformer_temp', state.temp.toFixed(1),'°C', tempClass(state.temp));
+  h+=row('','breaker_status', state.breakerClosed?'1':'0','', collapsed?'red':'');
+  tagsTbl.innerHTML=h;
+  document.getElementById('freqHud').textContent=state.freq.toFixed(2);
+  document.getElementById('loadVal').textContent=(state.load*100).toFixed(0)+'%';
+}
 
-function render(){
-  for (const [n,,get,d] of TAGS) $(`tg-${n}`).textContent = get().toFixed(d);
+/* ============================================================
+   2.5D ISOMETRIC RENDERER (SVG)
+============================================================ */
+const svgNS='http://www.w3.org/2000/svg';
+const svgWrap=document.getElementById('svgWrap');
+const VB_W=1000, VB_H=640;
+const svg=document.createElementNS(svgNS,'svg');
+svg.setAttribute('viewBox',`0 0 ${VB_W} ${VB_H}`);
+svg.setAttribute('preserveAspectRatio','xMidYMid meet');
+svgWrap.appendChild(svg);
 
-  $("vA").textContent = st.V[0].toFixed(0)+" V";
-  $("vB").textContent = st.V[1].toFixed(0)+" V";
-  $("vC").textContent = st.V[2].toFixed(0)+" V";
-  $("iA").textContent = st.I[0].toFixed(0)+" A";
-  $("iB").textContent = st.I[1].toFixed(0)+" A";
-  $("iC").textContent = st.I[2].toFixed(0)+" A";
-  $("pKw").textContent = st.kw.toFixed(0)+" kW";
-  $("fdrI").textContent = st.I[0].toFixed(0)+" A";
-  $("tTemp").textContent = st.temp.toFixed(1)+" °C";
-  $("loadEst").textContent = estimateLoad().toFixed(2);
+// isometric helper
+function iso(x,y,z){ const s=0.86; return [ 500 + (x-y)*s, 300 + (x+y)*0.5*s - z ]; }
+function P(...pts){ return pts.map(p=>iso(...p).map(v=>v.toFixed(1)).join(',')).join(' '); }
+const PC=['var(--phase-a)','var(--phase-b)','var(--phase-c)'];
 
-  const closed = st.breakerClosed;
-  $("brkState").textContent = closed ? "CLOSED" : "OPEN";
-  $("brkState").style.fill = closed ? "var(--ok)" : "var(--alarm)";
+// ground grid
+(function ground(){
+  const g=document.createElementNS(svgNS,'g'); g.setAttribute('opacity','0.28');
+  for(let i=-4;i<=6;i++){
+    for(const [a,b] of [[[i*60,-260,0],[i*60,320,0]],[[-260,i*60,0],[380,i*60,0]]]){
+      const l=document.createElementNS(svgNS,'polyline');
+      l.setAttribute('points',P(a,b)); l.setAttribute('fill','none');
+      l.setAttribute('stroke','#1a2534'); l.setAttribute('stroke-width','1'); g.appendChild(l);
+    }
+  }
+  svg.appendChild(g);
+})();
 
-  // Breaker arm physically lifts on trip.
-  const arm = $("brk-arm");
-  arm.setAttribute("x2", closed ? 180 : 199);
-  arm.setAttribute("y2", closed ? 260 : 234);
-  arm.setAttribute("stroke", closed ? "var(--pa)" : "var(--alarm)");
-  $("brk-box").setAttribute("stroke", closed ? "var(--pa)" : "var(--alarm)");
+// bus geometry along X: incoming(-220) -> breaker(-40) -> transformer(120) -> feeder(300)
+const busY=[-70,0,70];               // three phases offset in Y
+const seg=[-240,-40,120,300];        // x waypoints
+const dashEls=[], busEls=[], glowEls=[];
+function makeBus(){
+  for(let p=0;p<3;p++){
+    const y=busY[p];
+    // upstream (incoming -> breaker): always energised & flowing from source
+    // downstream (breaker -> feeder): flow only when closed
+    const parts=[
+      {a:[seg[0],y,120],b:[seg[1],y,120],down:false},
+      {a:[seg[1],y,120],b:[seg[2],y,120],down:true},
+      {a:[seg[2],y,120],b:[seg[3],y,120],down:true},
+    ];
+    parts.forEach((pt,idx)=>{
+      const base=document.createElementNS(svgNS,'polyline');
+      base.setAttribute('points',P(pt.a,pt.b));
+      base.setAttribute('fill','none'); base.setAttribute('stroke',PC[p]);
+      base.setAttribute('stroke-width','5'); base.setAttribute('stroke-linecap','round');
+      base.setAttribute('opacity','0.9'); svg.appendChild(base);
+      busEls.push({el:base,down:pt.down,p});
+      const dash=document.createElementNS(svgNS,'polyline');
+      dash.setAttribute('points',P(pt.a,pt.b));
+      dash.setAttribute('fill','none'); dash.setAttribute('stroke','#eaf6ff');
+      dash.setAttribute('stroke-width','2.5'); dash.setAttribute('stroke-linecap','round');
+      dash.setAttribute('stroke-dasharray','2 22'); dash.setAttribute('opacity','0.9');
+      svg.appendChild(dash); dashEls.push({el:dash,down:pt.down,p});
+    });
+    // support posts
+    [seg[0],seg[3]].forEach(x=>{
+      const post=document.createElementNS(svgNS,'polyline');
+      post.setAttribute('points',P([x,y,0],[x,y,120]));
+      post.setAttribute('stroke','#2a3a4d');
+      post.setAttribute('stroke-width','4'); post.setAttribute('fill','none'); svg.appendChild(post);
+    });
+  }
+}
+makeBus();
 
-  // THE SIGNATURE: only the conductors BELOW the breaker de-energize.
-  // c-src / c-bus / c-t1 stay live because bus voltage holds.
-  for (const el of deadables) el.classList.toggle("dead-c", !closed);
-  for (const el of deadables) el.classList.toggle("live-c", closed);
+// breaker glyphs (one per phase) at seg[1]
+const breakerArm=[];
+function makeBreakers(){
+  for(let p=0;p<3;p++){
+    const y=busY[p];
+    const [cx,cy]=iso(seg[1],y,120);
+    const g=document.createElementNS(svgNS,'g');
+    // housing
+    const box=document.createElementNS(svgNS,'polygon');
+    const w=16,h=26;
+    box.setAttribute('points',P([seg[1]-16,y,150],[seg[1]+16,y,150],[seg[1]+16,y,92],[seg[1]-16,y,92]));
+    box.setAttribute('fill','#141d29'); box.setAttribute('stroke','#31465e'); box.setAttribute('stroke-width','1.5');
+    g.appendChild(box);
+    // moving armature (line that lifts to create a gap when open)
+    const arm=document.createElementNS(svgNS,'line');
+    arm.setAttribute('stroke',PC[p]); arm.setAttribute('stroke-width','4'); arm.setAttribute('stroke-linecap','round');
+    g.appendChild(arm);
+    svg.appendChild(g);
+    breakerArm.push({arm,p,y});
+  }
+}
+makeBreakers();
 
-  // Current-flow animation speed tracks actual current.
-  const iAvg = (st.I[0]+st.I[1]+st.I[2])/3;
-  const dur = closed ? Math.max(0.35, 2.6 - (iAvg/350)*2.0) : 0;
-  flows.forEach((f,idx)=>{
-    const below = idx >= 2;                    // f-t2, f-fdr are downstream
-    const on = closed || !below;
-    f.style.stroke = on ? "var(--pa)" : "transparent";
-    f.style.opacity = on ? .9 : 0;
-    f.style.animation = (on && dur) ? `dash ${dur}s linear infinite` : "none";
+// transformer body at seg[2]
+const xfmrFill=[];
+function makeXfmr(){
+  const g=document.createElementNS(svgNS,'g');
+  const cx=seg[2];
+  const top=[[cx-40,-96,0],[cx+40,-96,0],[cx+40,96,0],[cx-40,96,0]];
+  // 3 stacked faces to fake a box
+  const faces=[
+    {pts:[[cx-40,-96,150],[cx+40,-96,150],[cx+40,96,150],[cx-40,96,150]], shade:1.0},  // top
+    {pts:[[cx+40,-96,150],[cx+40,96,150],[cx+40,96,0],[cx+40,-96,0]], shade:0.72},      // right
+    {pts:[[cx-40,96,150],[cx+40,96,150],[cx+40,96,0],[cx-40,96,0]], shade:0.5},         // front
+  ];
+  faces.forEach(f=>{
+    const poly=document.createElementNS(svgNS,'polygon');
+    poly.setAttribute('points',P(...f.pts));
+    poly.setAttribute('stroke','#0a1019'); poly.setAttribute('stroke-width','1.5');
+    g.appendChild(poly); xfmrFill.push({el:poly,shade:f.shade});
+  });
+  // bushings
+  for(let p=0;p<3;p++){
+    const b=document.createElementNS(svgNS,'polyline');
+    b.setAttribute('points',P([cx-25+p*25,busY[p]*0.5,150],[cx-25+p*25,busY[p]*0.5,190]));
+    b.setAttribute('stroke',PC[p]); b.setAttribute('stroke-width','3'); b.setAttribute('fill','none');
+    svg.appendChild(b);
+  }
+  const label=document.createElementNS(svgNS,'text');
+  const [lx,ly]=iso(cx,0,205);
+  label.setAttribute('x',lx); label.setAttribute('y',ly);
+  label.setAttribute('text-anchor','middle'); label.setAttribute('fill','#5f7086');
+  label.setAttribute('font-family','IBM Plex Mono, monospace'); label.setAttribute('font-size','12');
+  label.textContent='XFMR-1'; svg.appendChild(label);
+  svg.appendChild(g);
+}
+makeXfmr();
+
+function heatColor(t){ // teal->amber->red ramp on transformer_temp
+  const c1=[47,212,196], c2=[242,197,59], c3=[255,77,94];
+  let a,b,f;
+  if(t<=65){a=c1;b=c2;f=clamp((t-50)/15,0,1);}
+  else {a=c2;b=c3;f=clamp((t-65)/15,0,1);}
+  const m=a.map((v,i)=>Math.round(v+(b[i]-v)*f));
+  return `rgb(${m[0]},${m[1]},${m[2]})`;
+}
+
+let dashPhase=0;
+function renderSVG(dt){
+  const iAvg=(state.I[0]+state.I[1]+state.I[2])/3;
+  const flow = clamp(iAvg/350,0,1);
+  dashPhase -= flow*260*dt;   // dash march speed ∝ current
+  // buses: colour(=voltage) always shown; downstream dim slightly when de-loaded
+  busEls.forEach(b=>{
+    const energized = !b.down || state.breakerClosed;
+    b.el.setAttribute('opacity', energized?0.92:0.5);
+  });
+  dashEls.forEach(d=>{
+    const active = (!d.down || state.breakerClosed) && flow>0.02;
+    d.el.style.display = active?'':'none';
+    d.el.setAttribute('stroke-dashoffset', dashPhase.toFixed(1));
+    d.el.setAttribute('opacity', (0.35+0.55*flow).toFixed(2));
+  });
+  // breaker armature lift
+  breakerArm.forEach(b=>{
+    const closedZ=120, openLift=42;
+    const z1 = closedZ, z2 = state.breakerClosed?closedZ:closedZ+openLift;
+    const [x1,y1]=iso(seg[1]-13,b.y,z1);
+    const [x2,y2]=iso(seg[1]+13,b.y,z2);
+    b.arm.setAttribute('x1',x1);b.arm.setAttribute('y1',y1);
+    b.arm.setAttribute('x2',x2);b.arm.setAttribute('y2',y2);
+    b.arm.setAttribute('opacity', state.breakerClosed?1:0.85);
+    b.arm.setAttribute('stroke', state.breakerClosed?PC[b.p]:'#ff4d5e');
+  });
+  // transformer heat
+  const hc=heatColor(state.temp);
+  xfmrFill.forEach(x=>{
+    x.el.setAttribute('fill', shade(hc,x.shade));
+  });
+}
+function shade(rgb,f){
+  const m=rgb.match(/\d+/g).map(Number);
+  return `rgb(${m.map(v=>Math.round(v*f + 8*(1-f))).join(',')})`;
+}
+
+/* ============================================================
+   3D RENDERER (three.js r128) — custom orbit, no OrbitControls dep
+============================================================ */
+const glWrap=document.getElementById('glWrap');
+let renderer,scene,cam3d, three={ready:false};
+function initThree(){
+  renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  glWrap.appendChild(renderer.domElement);
+  scene=new THREE.Scene();
+  scene.fog=new THREE.FogExp2(0x0a0e14,0.0025);
+  cam3d=new THREE.PerspectiveCamera(45,1,0.1,2000);
+
+  // Shared lighting baseline (twin3d-kit.js) — this project's default three.js
+  // scenes kept coming out too dark; these are the corrected values, now
+  // canonical so future twins (water, datacenter, pipeline) start here instead
+  // of re-deriving it. Values are identical to what this file used inline
+  // before the extraction — verified constant-for-constant.
+  Twin3D.addLighting(scene, {fog:0}); // fog already set above with this file's own color
+
+  // Orbit/nav pad, shared via twin3d-kit.js. Constructed here (not at
+  // top-level script scope like the original inline version) because it
+  // captures `cam3d` by reference at call time, and cam3d doesn't exist
+  // until this function runs. focus() is a lazy callback, so it's fine that
+  // three.content doesn't exist yet at this point in initThree().
+  three.nav = Twin3D.createOrbitNav({
+    THREE, camera: cam3d, dom: glWrap,
+    navpadEl: document.getElementById('navpad'),
+    focus: () => three.content,
   });
 
-  // Transformer thermal tint.
-  const heat = clamp((st.temp - 50)/(XFMR_RED - 50), 0, 1);
-  const hx = $("xf-heat");
-  hx.setAttribute("opacity", (heat*0.22).toFixed(3));
-  hx.setAttribute("fill", st.temp>=XFMR_RED ? "var(--alarm)"
-                        : st.temp>=XFMR_WARN ? "var(--warn)" : "var(--pa)");
-  const tcol = st.temp>=XFMR_RED ? "var(--alarm)" : st.temp>=XFMR_WARN ? "var(--warn)" : "var(--txt)";
-  $("tTemp").style.fill = tcol;
-  for (const c of ["xf-a","xf-b"]) $(c).setAttribute("stroke", closed ? tcol : "var(--dead)");
+  // ground grid
+  const grid=new THREE.GridHelper(600,30,0x3a516d,0x223047);
+  grid.material.opacity=0.6; grid.material.transparent=true; scene.add(grid);
+  three.content=new THREE.Group(); scene.add(three.content);   // equipment only (for centering/fit)
+
+  const phaseHex=[0xf2a63b,0x3bd6f2,0xe04ff2];
+  const zRow=[-34,0,34];
+  const segX=[-150,-30,70,180];
+
+  three.busBase=[]; three.flow=[]; three.arm=[]; three.busDown=[];
+  // busbars per phase
+  for(let p=0;p<3;p++){
+    // upstream + downstream cylinders
+    [[segX[0],segX[1],false],[segX[1],segX[3],true]].forEach(([xa,xb,down])=>{
+      const len=xb-xa;
+      const geo=new THREE.CylinderGeometry(1.6,1.6,len,10);
+      const mat=new THREE.MeshStandardMaterial({color:phaseHex[p],emissive:phaseHex[p],emissiveIntensity:0.55,metalness:0.4,roughness:0.5});
+      const bar=new THREE.Mesh(geo,mat);
+      bar.rotation.z=Math.PI/2; bar.position.set((xa+xb)/2,52,zRow[p]);
+      three.content.add(bar); three.busBase.push({mesh:bar,mat,down,p});
+    });
+    // flow pips (small emissive spheres travelling downstream buses)
+    const pips=[];
+    for(let k=0;k<5;k++){
+      const s=new THREE.Mesh(new THREE.SphereGeometry(2.4,10,10),
+        new THREE.MeshBasicMaterial({color:0xffffff}));
+      s.position.y=52; s.position.z=zRow[p]; three.content.add(s);
+      pips.push({mesh:s,off:k/5});
+    }
+    three.flow.push({pips,p,x0:segX[1],x1:segX[3]});
+    // supports
+    [segX[0],segX[3]].forEach(x=>{
+      const post=new THREE.Mesh(new THREE.CylinderGeometry(1.4,1.6,52,8),
+        new THREE.MeshStandardMaterial({color:0x4a5f78,metalness:0.55,roughness:0.55}));
+      post.position.set(x,26,zRow[p]); three.content.add(post);
+    });
+    // breaker unit at segX[1]
+    const hous=new THREE.Mesh(new THREE.BoxGeometry(10,20,10),
+      new THREE.MeshStandardMaterial({color:0x33445c,metalness:0.5,roughness:0.5}));
+    hous.position.set(segX[1],52,zRow[p]); three.content.add(hous);
+    const arm=new THREE.Mesh(new THREE.CylinderGeometry(1.4,1.4,18,8),
+      new THREE.MeshStandardMaterial({color:phaseHex[p],emissive:phaseHex[p],emissiveIntensity:0.7}));
+    arm.position.set(segX[1],52,zRow[p]); three.content.add(arm);
+    three.arm.push({mesh:arm,p,baseY:52});
+  }
+
+  // transformer
+  const xg=new THREE.BoxGeometry(46,44,80);
+  three.xfmrMat=new THREE.MeshStandardMaterial({color:0x2c5470,emissive:0x2fd4c4,emissiveIntensity:0.2,metalness:0.3,roughness:0.5});
+  const xf=new THREE.Mesh(xg,three.xfmrMat); xf.position.set(segX[2],28,0); three.content.add(xf);
+  // radiator fins
+  for(let i=-2;i<=2;i++){
+    const fin=new THREE.Mesh(new THREE.BoxGeometry(3,40,80),
+      new THREE.MeshStandardMaterial({color:0x274155,metalness:0.4,roughness:0.6}));
+    fin.position.set(segX[2]+27, 28, i*14); three.content.add(fin);
+  }
+  three.ready=true;
+  resize3d();
 }
 
-const style = document.createElement("style");
-style.textContent = "@keyframes dash{to{stroke-dashoffset:-28}}";
-document.head.appendChild(style);
+function resize3d(){
+  if(!renderer)return;
+  const w=glWrap.clientWidth||glWrap.parentElement.clientWidth, h=glWrap.clientHeight||glWrap.parentElement.clientHeight;
+  renderer.setSize(w,h,false); cam3d.aspect=w/h; cam3d.updateProjectionMatrix();
+}
+window.addEventListener('resize',resize3d);
 
-/* ==========================================================================
-   CONTROLS / SCENARIO
-   ========================================================================== */
-function alarm(msg){
-  const b = $("alarmBar");
-  if (!msg){ b.classList.remove("on"); b.innerHTML=""; return; }
-  b.innerHTML = msg; b.classList.add("on");
+function heatEmissive(t){ // returns {color,intensity}
+  const rgb=heatColor(t).match(/\d+/g).map(Number);
+  return {color:(rgb[0]<<16)|(rgb[1]<<8)|rgb[2], intensity:0.18+clamp((t-50)/34,0,1)*0.9};
+}
+function renderThree(dt){
+  if(!three.ready)return;
+  const iAvg=(state.I[0]+state.I[1]+state.I[2])/3;
+  const flow=clamp(iAvg/350,0,1);
+  // buses: emissive (voltage presence) holds; downstream loses flow not glow
+  three.busBase.forEach(b=>{
+    b.mat.emissiveIntensity = (!b.down||state.breakerClosed)?0.55:0.4;
+  });
+  // flow pips travel only on downstream when closed
+  three.flow.forEach(f=>{
+    const on = state.breakerClosed && flow>0.02;
+    f.pips.forEach(p=>{
+      p.mesh.visible=on;
+      if(on){
+        p.off=(p.off + flow*0.5*dt)%1;
+        p.mesh.position.x=f.x0+(f.x1-f.x0)*p.off;
+        p.mesh.material.opacity=1;
+      }
+    });
+  });
+  // breaker armature lifts + reddens when open
+  three.arm.forEach(a=>{
+    const targetY=state.breakerClosed?a.baseY:a.baseY+13;
+    a.mesh.position.y += (targetY-a.mesh.position.y)*Math.min(1,6*dt);
+    const c=state.breakerClosed?[0xf2a63b,0x3bd6f2,0xe04ff2][a.p]:0xff4d5e;
+    a.mesh.material.color.setHex(c); a.mesh.material.emissive.setHex(c);
+  });
+  // transformer heat
+  const he=heatEmissive(state.temp);
+  three.xfmrMat.emissive.setHex(he.color);
+  three.xfmrMat.emissiveIntensity += (he.intensity-three.xfmrMat.emissiveIntensity)*Math.min(1,3*dt);
+  three.nav.update();
+  renderer.render(scene,cam3d);
 }
 
+/* ============================================================
+   LIVE MQTT-over-WebSocket SOURCE
+   - mqtt.js loaded lazily from CDN (SIM never blocks on it)
+   - read-only: subscribes only; never publishes device writes
+   - topic-depth agnostic parser (grid/<tag> OR grid/<board>/<tag>)
+   - bare-string status → birth/LWT; JSON {"value":...} → telemetry
+============================================================ */
+let connState='sim';          // 'sim'|'connecting'|'connected'|'offline'|'error'
+let client=null, mqttLibReady=(typeof mqtt!=='undefined');
+const connMsg=document.getElementById('connMsg');
+function setConn(s,txt,cls){ connState=s; if(txt!==undefined){ connMsg.textContent=txt; connMsg.className='conn-msg'+(cls?' '+cls:''); } }
+
+function loadMqttLib(cb){
+  if(mqttLibReady) return cb();
+  setConn('connecting','Loading MQTT client…','wait');
+  const s=document.createElement('script');
+  s.src='https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js';
+  s.onload=()=>{ mqttLibReady=(typeof mqtt!=='undefined'); mqttLibReady?cb():setConn('error','MQTT client did not initialise.','err'); };
+  s.onerror=()=>setConn('error','Could not load MQTT client (CDN blocked?). Swap the mqtt version in the source if needed.','err');
+  document.head.appendChild(s);
+}
+
+// firmware may still carry the older _phase_ infix — fold it back to canonical
+function canonTag(t){
+  return ({voltage_phase_a:'voltage_a',voltage_phase_b:'voltage_b',voltage_phase_c:'voltage_c',
+           current_phase_a:'current_a',current_phase_b:'current_b',current_phase_c:'current_c'})[t] || t;
+}
+// maps a canonical tag name → state.rx slot. Shared by live + replay.
+function applyTag(rawLeaf,val){
+  const leaf=canonTag(rawLeaf);
+  val=Number(val); if(!isFinite(val)) return false;
+  const rx=state.rx, m={voltage_a:['V',0],voltage_b:['V',1],voltage_c:['V',2],
+    current_a:['I',0],current_b:['I',1],current_c:['I',2]}[leaf];
+  if(m){ rx[m[0]][m[1]]=val; }
+  else if(leaf==='frequency')        rx.freq=val;
+  else if(leaf==='power_factor')     rx.pf=val;
+  else if(leaf==='real_power_kw')    rx.realKw=val;
+  else if(leaf==='transformer_temp') rx.temp=val;
+  else if(leaf==='breaker_status')   rx.breaker=val;
+  else return false;                               // unknown tag ignored
+  return true;
+}
+function ingest(topic,payloadStr){
+  const parts=topic.split('/');
+  if(parts[0]==='cmd') return;                     // command topics never enter telemetry
+  const leaf=parts[parts.length-1];
+  const isPerBoard = parts.length>=3;               // grid/<short>/<tag> vs flat grid/<tag>
+  const board = isPerBoard ? parts[1] : null;
+
+  if(canonTag(leaf)==='status'){                   // birth/LWT — bare string, not JSON
+    const s=payloadStr.trim().replace(/^"|"$/g,'').toLowerCase();
+    if(s!=='online' && s!=='offline') return;       // ignore garbage, don't guess
+    const on=(s==='online');
+    if(board){
+      const isNew = !(board in state.boards);
+      state.boards[board]={online:on};
+      updateFeederOptions();
+      // Auto-pick the first feeder seen so the view works with zero clicks;
+      // switching later is still the operator's call via the dropdown.
+      if(isNew && !state.selectedBoard) selectFeeder(board);
+    } else {
+      state.online=on;
+    }
+    return;
+  }
+  // Per-board telemetry only updates the view if it's the SELECTED feeder —
+  // otherwise six boards on one grid/# subscription would blend together,
+  // last-message-wins, with no way to tell whose numbers you're looking at.
+  if(isPerBoard && state.selectedBoard && board!==state.selectedBoard) return;
+
+  let val;
+  try{ const j=JSON.parse(payloadStr); val=(j&&typeof j==='object')?j.value:j; }
+  catch{ val=parseFloat(payloadStr); }
+  if(applyTag(leaf,val)){ state.lastMsg=performance.now(); state.online=true; }
+}
+
+function updateFeederOptions(){
+  const sel=document.getElementById('feederSelect');
+  const cur=sel.value;
+  const shorts=Object.keys(state.boards).sort();
+  sel.innerHTML = shorts.length
+    ? shorts.map(s=>`<option value="${s}">${s} (${state.boards[s].online?'online':'offline'})</option>`).join('')
+    : '<option value="">— connect to discover —</option>';
+  if(shorts.includes(cur)) sel.value=cur;           // preserve selection across re-renders
+}
+function selectFeeder(short){
+  state.selectedBoard=short;
+  document.getElementById('feederSelect').value=short;
+  // Stale-until-proven-fresh: switching feeders shouldn't keep showing the
+  // PREVIOUS board's last values dressed up as live. Forcing stale=true here
+  // greys the view out until the newly selected board's own next message
+  // arrives — matches the repo's "never render stale data as live" invariant.
+  state.lastMsg=0;
+}
+document.getElementById('feederSelect').onchange=e=>{ if(e.target.value) selectFeeder(e.target.value); };
+
+function connectLive(){
+  const url=document.getElementById('wsUrl').value.trim();
+  const root=document.getElementById('topicRoot').value.trim().replace(/\/#?$/,'');
+  const user=document.getElementById('mqUser').value.trim();
+  const pass=document.getElementById('mqPass').value;
+  if(client){ client.end(true); client=null; }
+  state.boards={}; state.selectedBoard=null; updateFeederOptions();
+  loadMqttLib(()=>{
+    setConn('connecting','Connecting to '+url+' …','wait');
+    try{
+      client=mqtt.connect(url,{username:user||undefined,password:pass||undefined,
+        connectTimeout:8000,reconnectPeriod:4000,clean:true,clientId:'grid-twin-'+Math.random().toString(16).slice(2,8)});
+    }catch(e){ setConn('error','Connect failed: '+e.message,'err'); return; }
+    client.on('connect',()=>{
+      setConn('connected','Connected · subscribed to '+root+'/#','ok');
+      client.subscribe(root+'/#'); state.lastMsg=performance.now();
+    });
+    client.on('message',(t,p)=>ingest(t,p.toString()));
+    client.on('error',e=>setConn('error','Error: '+(e&&e.message||e),'err'));
+    client.on('close',()=>{ if(connState!=='error') setConn('offline','Connection closed.',''); });
+    client.on('offline',()=>setConn('offline','Broker offline / unreachable.',''));
+  });
+}
+function disconnectLive(){ if(client){ client.end(true); client=null; } setConn('sim'); }
+
+/* ============================================================
+   INFLUXDB REPLAY SOURCE
+   - points streamed through the SAME applyTag() path as live
+   - two acquisition modes: paste/upload Flux CSV, or query
+     (via same-origin backend proxy, or Influx-direct for testing)
+   - replay events carry real _time stamps → played back by real
+     inter-sample deltas × speed (unlike live, which uses arrival)
+============================================================ */
+const replay={points:[],idx:0,clock:0,t0:0,t1:0,playing:false,speed:1.0};
+const qMsg=document.getElementById('qMsg'), rpMsg=document.getElementById('rpMsg');
+function setQ(t,cls){ qMsg.textContent=t; qMsg.className='conn-msg'+(cls?' '+cls:''); }
+
+// tolerant Flux annotated-CSV parser (handles multiple header blocks/tables)
+function parseFluxCSV(text){
+  const pts=[]; let col=null;
+  for(const raw of text.split(/\r?\n/)){
+    if(!raw.trim()) continue;
+    if(raw[0]==='#') continue;                     // annotation lines
+    const cells=raw.split(',');
+    if(cells.includes('_time') && cells.includes('_field')){
+      col={}; cells.forEach((c,i)=>col[c.trim()]=i); continue;   // (re)header
+    }
+    if(!col) continue;
+    const t=Date.parse(cells[col['_time']]);
+    const field=(cells[col['_field']]||'').trim();
+    const value=parseFloat(cells[col['_value']]);
+    if(isFinite(t) && field && isFinite(value)) pts.push({t,field,value});
+  }
+  pts.sort((a,b)=>a.t-b.t);
+  return pts;
+}
+
+function loadReplay(pts){
+  replay.points=pts; replay.idx=0;
+  if(pts.length){ replay.t0=pts[0].t; replay.t1=pts[pts.length-1].t; replay.clock=replay.t0; }
+  replay.playing=pts.length>1;
+  document.getElementById('transport').style.display = pts.length? 'block':'none';
+  playBtn.textContent = replay.playing? '❚❚ Pause':'▶ Play';
+  rpMsg.textContent = pts.length? (pts.length+' points · '+new Date(replay.t0).toISOString().slice(11,19)+'→'+new Date(replay.t1).toISOString().slice(11,19)) : 'No points parsed.';
+  applyUpTo(replay.clock);
+}
+function applyUpTo(clk){
+  while(replay.idx<replay.points.length && replay.points[replay.idx].t<=clk){
+    applyTag(replay.points[replay.idx].field, replay.points[replay.idx].value); replay.idx++;
+  }
+}
+function replayStep(dt){
+  if(!replay.points.length) return;
+  if(replay.playing){
+    replay.clock += dt*1000*replay.speed;
+    if(replay.clock>=replay.t1){ replay.clock=replay.t1; replay.playing=false; playBtn.textContent='▶ Play'; }
+  }
+  applyUpTo(replay.clock);
+  const span=replay.t1-replay.t0||1;
+  scrub.value=Math.round((replay.clock-replay.t0)/span*1000);
+  tStamp.textContent=new Date(replay.clock).toISOString().slice(11,19);
+}
+function seekReplay(frac){
+  replay.clock=replay.t0+(replay.t1-replay.t0)*frac;
+  replay.idx=0;                                    // reapply forward from 0 (cheap)
+  applyUpTo(replay.clock);
+}
+
+// ---- acquisition: CSV ----
+document.getElementById('csvLoadBtn').onclick=()=>{
+  const txt=document.getElementById('csvBox').value;
+  const pts=parseFluxCSV(txt);
+  loadReplay(pts);
+};
+document.getElementById('csvFile').onchange=e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload=()=>{ document.getElementById('csvBox').value=r.result; loadReplay(parseFluxCSV(r.result)); };
+  r.readAsText(f);
+};
+
+// ---- acquisition: query ----
+function buildFlux(){
+  const meas=document.getElementById('qMeas').value.trim();
+  const dev=document.getElementById('qDev').value.trim();
+  const start=document.getElementById('qStart').value.trim();
+  const stop=document.getElementById('qStop').value.trim();
+  return `from(bucket:"ics-telemetry")\n  |> range(start:${start}, stop:${stop})\n  |> filter(fn:(r)=> r._measurement=="${meas}" and r.device=="${dev}")\n  |> sort(columns:["_time"])`;
+}
+let qMode='backend';
+document.getElementById('qLoadBtn').onclick=async()=>{
+  const flux=buildFlux();
+  setQ('Querying…','wait');
+  try{
+    let csv;
+    if(qMode==='backend'){
+      const base=document.getElementById('beBase').value.trim();
+      const res=await fetch(base,{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({flux, meas:document.getElementById('qMeas').value.trim(),
+          device:document.getElementById('qDev').value.trim(),
+          start:document.getElementById('qStart').value.trim(),
+          stop:document.getElementById('qStop').value.trim()})});
+      if(!res.ok) throw new Error('backend '+res.status);
+      csv=await res.text();
+    } else {
+      const url=document.getElementById('ixUrl').value.trim().replace(/\/$/,'');
+      const org=encodeURIComponent(document.getElementById('ixOrg').value.trim());
+      const tok=document.getElementById('ixTok').value;
+      const res=await fetch(`${url}/api/v2/query?org=${org}`,{method:'POST',
+        headers:{'Authorization':'Token '+tok,'Content-Type':'application/vnd.flux','Accept':'application/csv'},
+        body:flux});
+      if(!res.ok) throw new Error('influx '+res.status);
+      csv=await res.text();
+    }
+    const pts=parseFluxCSV(csv);
+    setQ(pts.length? ('Loaded '+pts.length+' points.'):'Query returned no rows.', pts.length?'ok':'wait');
+    loadReplay(pts);
+  }catch(e){
+    setQ('Failed: '+e.message+' — CORS/mixed-content? Try the CSV path or the backend proxy.','err');
+  }
+};
+
+// query sub-toggles
+const qBackend=document.getElementById('qBackend'), qDirect=document.getElementById('qDirect');
+qBackend.onclick=()=>{ qMode='backend'; qBackend.classList.add('active'); qDirect.classList.remove('active');
+  document.getElementById('qBackendPanel').style.display='block'; document.getElementById('qDirectPanel').style.display='none'; };
+qDirect.onclick=()=>{ qMode='direct'; qDirect.classList.add('active'); qBackend.classList.remove('active');
+  document.getElementById('qBackendPanel').style.display='none'; document.getElementById('qDirectPanel').style.display='block'; };
+// acquisition sub-toggles
+const acqCsv=document.getElementById('acqCsv'), acqQuery=document.getElementById('acqQuery');
+acqCsv.onclick=()=>{ acqCsv.classList.add('active'); acqQuery.classList.remove('active');
+  document.getElementById('acqCsvPanel').style.display='block'; document.getElementById('acqQueryPanel').style.display='none'; };
+acqQuery.onclick=()=>{ acqQuery.classList.add('active'); acqCsv.classList.remove('active');
+  document.getElementById('acqCsvPanel').style.display='none'; document.getElementById('acqQueryPanel').style.display='block'; };
+
+// transport controls
+const playBtn=document.getElementById('playBtn'), scrub=document.getElementById('scrub'),
+      tStamp=document.getElementById('tStamp'), speedSl=document.getElementById('speed'), spVal=document.getElementById('spVal');
+playBtn.onclick=()=>{
+  if(!replay.points.length) return;
+  if(!replay.playing && replay.clock>=replay.t1){ seekReplay(0); }   // restart from end
+  replay.playing=!replay.playing; playBtn.textContent=replay.playing?'❚❚ Pause':'▶ Play';
+};
+scrub.oninput=()=>{ replay.playing=false; playBtn.textContent='▶ Play'; seekReplay(scrub.value/1000); };
+speedSl.oninput=()=>{ replay.speed=speedSl.value/10; spVal.textContent=replay.speed.toFixed(1)+'×'; };
+
+/* ============================================================
+   MODE SWITCH + MAIN LOOP
+============================================================ */
+let mode='25';
+const b25=document.getElementById('mode25'), b3d=document.getElementById('mode3d');
+const hint=document.getElementById('hint');
+function setMode(m){
+  mode=m;
+  b25.classList.toggle('active',m==='25'); b3d.classList.toggle('active',m==='3d');
+  svgWrap.style.display=m==='25'?'block':'none';
+  glWrap.style.display=m==='3d'?'block':'none';
+  hint.textContent = m==='3d' ? 'Drag to orbit · scroll to zoom · buttons for presets' : 'Isometric one-line · flow speed ∝ current';
+  document.getElementById('navpad').classList.toggle('on', m==='3d');
+  if(m==='3d'){ if(!renderer) initThree(); resize3d(); }
+}
+b25.onclick=()=>setMode('25'); b3d.onclick=()=>setMode('3d');
+
+// controls
+const autoLoad=document.getElementById('autoLoad'), slider=document.getElementById('loadSlider');
+autoLoad.onchange=()=>{ state.autoLoad=autoLoad.checked; slider.disabled=autoLoad.checked||state.source==='live'; };
+slider.oninput=()=>{ if(!state.autoLoad && state.source==='sim') state.load=slider.value/100; };
+const tripBtn=document.getElementById('tripBtn'), restoreBtn=document.getElementById('restoreBtn');
+const brkState=document.getElementById('brkState'), sig=document.getElementById('sig');
 function setBreaker(closed){
-  st.breakerClosed = closed;
-  render();
+  state.breakerClosed=closed;
+  brkState.textContent=closed?'1 · closed':'0 · open';
+  brkState.className='breaker-state '+(closed?'closed':'open');
+  tripBtn.style.display=closed?'':'none';
+  restoreBtn.style.display=closed?'none':'';
 }
+tripBtn.onclick=()=>{ if(state.source==='sim') setBreaker(false); };
+restoreBtn.onclick=()=>{ if(state.source==='sim') setBreaker(true); };
 
-$("btnTrip").onclick  = () => { setBreaker(false);
-  alarm("<strong>BREAKER OPEN</strong> — feeder de-energized. Bus voltage holding at nominal."); };
-$("btnClose").onclick = () => { setBreaker(true); alarm(null); };
-$("btnReset").onclick = () => {
-  st.breakerClosed = true; st.loadWalk = 0.60; st.temp = 55.0; st.t0 = Date.now();
-  alarm(null); render();
-};
-
-$("btnAttack").onclick = () => {
-  const b = $("btnAttack"); b.disabled = true;
-  alarm("<strong>UNAUTHORIZED CONTROL COMMAND</strong> — breaker open issued to feeder. " +
-        "TTP consistent with Industroyer / CRASHOVERRIDE (2016 Ukraine): direct " +
-        "manipulation of a breaker control point, no exploit required.");
-  setBreaker(false);
-  setTimeout(()=>{
-    alarm("<strong>SIGNATURE CONFIRMED</strong> — current and real power collapsed; " +
-          "bus voltage held at nominal. This is a commanded trip, not a fault. " +
-          "A fault would drag voltage down with it.");
-  }, 5000);
-  setTimeout(()=>{ setBreaker(true); alarm(null); b.disabled = false; }, 12000);
-};
-
-/* ==========================================================================
-   LIVE MQTT PATH
-   --------------------------------------------------------------------------
-   The simulator and the live feed write to the SAME `st` object, so nothing
-   downstream — render, the one-line diagram, the estimator — knows or cares
-   which source is driving. That's the whole reason the swap is cheap.
-
-   Requires a broker with a websockets listener (Mosquitto: `listener 9001` +
-   `protocol websockets`). A browser can't open a raw TCP socket, so port 1883
-   is unreachable from here by construction.
-
-   Read-only, always: this connects as `monitor-reader` and only ever
-   subscribes. Commands are the fleet manager's job, not the twin's — a
-   visualization that can also actuate is a bigger blast radius than it needs
-   to be. Trip/scenario buttons are disabled while live.
-   ========================================================================== */
-const live = { client:null, board:null, lastMsg:0, stale:false, connected:false };
-const STALE_MS = 10000;   // 5 missed publish intervals
-
-// Declared here, above every function that touches it. `let` has no hoisting,
-// so leaving this at the bottom of the file would put stopSim()/startSim() in
-// the temporal dead zone for anyone who later calls them during init.
-let simTimer = null;
-
-function stopSim(){ if (simTimer){ clearInterval(simTimer); simTimer = null; } }
-function startSim(){
-  if (!simTimer) simTimer = setInterval(()=>{ updatePhysics(); render(); }, TICK_MS);
+// source toggle
+const srcSim=document.getElementById('srcSim'), srcLive=document.getElementById('srcLive'), srcReplay=document.getElementById('srcReplay');
+const livePanel=document.getElementById('livePanel'), replayPanel=document.getElementById('replayPanel');
+const srcDot=document.getElementById('srcDot'), srcLabel=document.getElementById('srcLabel');
+function lockSimControls(locked){
+  [tripBtn,restoreBtn].forEach(b=>{ b.style.opacity=locked?.35:1; b.style.pointerEvents=locked?'none':'auto'; });
+  autoLoad.disabled=locked; slider.disabled=locked||state.autoLoad;
+  autoLoad.parentElement.style.opacity=locked?.5:1;
 }
-
-function setBadge(text, cls){
-  const b = $("srcBadge");
-  b.textContent = text;
-  b.className = "badge" + (cls ? " " + cls : "");
+function setSource(src){
+  state.source=src;
+  srcSim.classList.toggle('active',src==='sim');
+  srcLive.classList.toggle('active',src==='live');
+  srcReplay.classList.toggle('active',src==='replay');
+  livePanel.style.display=src==='live'?'block':'none';
+  replayPanel.style.display=src==='replay'?'block':'none';
+  lockSimControls(src!=='sim');
+  if(src==='live'){ setConn(client?connState:'offline'); }
+  else if(src==='replay'){ disconnectLive(); state.stale=false; }
+  else { disconnectLive(); state.stale=false; state.online=false; replay.playing=false; setBreaker(true); }
 }
+srcSim.onclick=()=>setSource('sim');
+srcLive.onclick=()=>setSource('live');
+srcReplay.onclick=()=>setSource('replay');
+document.getElementById('connectBtn').onclick=connectLive;
 
-function simControls(enabled){
-  for (const id of ["btnTrip","btnClose","btnAttack","btnReset"]) $(id).disabled = !enabled;
+function setDot(c){ srcDot.style.background=c; srcDot.style.boxShadow='0 0 10px '+c; }
+function updatePill(){
+  if(state.source==='sim'){ setDot('var(--warn)'); srcLabel.textContent='SIM'; return; }
+  if(state.source==='replay'){ setDot('var(--phase-b)');
+    srcLabel.textContent = replay.points.length? (replay.playing?'REPLAY ▶':'REPLAY ❚❚') : 'REPLAY'; return; }
+  if(connState==='connected'){ setDot(state.stale?'var(--red)':'var(--ok)'); srcLabel.textContent=state.stale?'LIVE · STALE':'LIVE'; }
+  else if(connState==='connecting'){ setDot('var(--warn)'); srcLabel.textContent='CONNECTING'; }
+  else { setDot('var(--red)'); srcLabel.textContent='OFFLINE'; }
 }
+const stageEl=document.querySelector('.stage');
 
-// Tag -> state. One place, so a firmware tag rename breaks loudly here and
-// nowhere else.
-const APPLY = {
-  voltage_a: v => st.V[0]=v,  voltage_b: v => st.V[1]=v,  voltage_c: v => st.V[2]=v,
-  current_a: v => st.I[0]=v,  current_b: v => st.I[1]=v,  current_c: v => st.I[2]=v,
-  frequency: v => st.freq=v,  power_factor: v => st.pf=v, real_power_kw: v => st.kw=v,
-  transformer_temp: v => st.temp=v,
-  // 1 = closed (normal), 0 = open. Verified against firmware — no inversion.
-  breaker_status: v => st.breakerClosed = (v >= 0.5),
-};
-
-function goLive(host, port, user, pass, board){
-  return new Promise((resolve, reject) => {
-    if (typeof mqtt === "undefined")
-      return reject(new Error("mqtt.js failed to load — offline? The simulator still works."));
-
-    const url = `${location.protocol === "https:" ? "wss" : "ws"}://${host}:${port}`;
-    const c = mqtt.connect(url, {
-      username:user, password:pass, connectTimeout:6000,
-      reconnectPeriod:3000, clientId:"grid-twin-"+Math.random().toString(16).slice(2,8),
-    });
-
-    let settled = false;
-    c.on("connect", () => {
-      live.client = c; live.connected = true;
-      // Subscribe to all boards' status so the feeder picker can populate,
-      // but only one board's telemetry.
-      c.subscribe("grid/+/status");
-      if (board) subscribeBoard(board);
-      if (!settled){ settled = true; resolve(c); }
-    });
-
-    c.on("error", err => {
-      live.connected = false;
-      setBadge("CONNECTION ERROR", "err");
-      if (!settled){ settled = true; c.end(true); reject(err); }
-    });
-
-    c.on("close", () => {
-      live.connected = false;
-      if (live.board) setBadge("RECONNECTING · " + live.board, "stale");
-    });
-
-    c.on("message", (topic, buf) => {
-      const parts = topic.split("/");
-      if (parts.length !== 3 || parts[0] !== "grid") return;
-      const [, short, leaf] = parts;
-
-      // grid/<short>/status is a BARE STRING ("online"/"offline"), retained —
-      // unlike every data tag, which is JSON. Parsing it as JSON throws.
-      if (leaf === "status"){
-        const s = buf.toString().trim();
-        addBoardOption(short, s);
-        if (short === live.board && s === "offline"){
-          live.stale = true;
-          setBadge("OFFLINE · " + short, "offline");
-          document.body.classList.add("stale");
-        }
-        return;
-      }
-      if (short !== live.board) return;
-
-      let v;
-      try { v = JSON.parse(buf.toString()).value; }
-      catch { return; }                       // malformed: drop, don't crash
-      const fn = APPLY[leaf];
-      if (!fn) return;                        // unknown tag: firmware drift
-      fn(Number(v));
-
-      live.lastMsg = Date.now();
-      if (live.stale){
-        live.stale = false;
-        document.body.classList.remove("stale");
-        setBadge("LIVE · " + live.board, "live");
-      }
-      render();
-    });
-  });
+let last=performance.now();
+function loop(now){
+  let dt=(now-last)/1000; last=now; dt=Math.min(dt,0.05);
+  physics(dt);
+  renderHUD();
+  if(mode==='25') renderSVG(dt); else renderThree(dt);
+  // live/replay: breaker + signature are read off the wire (not the buttons)
+  if(state.source==='live' || state.source==='replay'){
+    brkState.textContent=state.breakerClosed?'1 · closed':'0 · open';
+    brkState.className='breaker-state '+(state.breakerClosed?'closed':'open');
+    stageEl.style.filter=(state.source==='live'&&state.stale)?'grayscale(.7) brightness(.7)':'none';
+  } else { stageEl.style.filter='none'; }
+  sig.classList.toggle('on', !state.breakerClosed);
+  updatePill();
+  requestAnimationFrame(loop);
 }
-
-function subscribeBoard(short){
-  live.board = short;
-  live.lastMsg = Date.now();
-  live.client.subscribe(`grid/${short}/#`);
-  setBadge("LIVE · " + short, "live");
-  $("srcNote").innerHTML =
-    `Rendering live telemetry from feeder <span class="k">${short}</span>. ` +
-    `Read-only — the twin subscribes and never publishes. ` +
-    `Control commands belong to the fleet manager.`;
-}
-
-function addBoardOption(short, status){
-  const sel = $("dBoard");
-  if ([...sel.options].some(o => o.value === short)) return;
-  if (sel.options[0] && sel.options[0].value === "") sel.remove(0);
-  const o = document.createElement("option");
-  o.value = short; o.textContent = `${short} (${status})`;
-  sel.appendChild(o);
-}
-
-// Staleness: a board that stopped publishing without a clean LWT still looks
-// fine if you just keep rendering its last value. Watch the clock, not the LWT.
-setInterval(() => {
-  if (!live.board || live.stale) return;
-  if (Date.now() - live.lastMsg > STALE_MS){
-    live.stale = true;
-    document.body.classList.add("stale");
-    setBadge("STALE · " + live.board, "stale");
-  }
-}, 1000);
-
-function disconnectLive(){
-  if (live.client){ live.client.end(true); live.client = null; }
-  live.board = null; live.connected = false; live.stale = false;
-  document.body.classList.remove("stale");
-  $("btnDisc").style.display = "none";
-  setBadge("SIMULATED · no hardware required", "");
-  $("srcNote").innerHTML =
-    "Running the built-in simulator — the firmware physics, ported. " +
-    "Connect to the fleet to render a real board's telemetry instead.";
-  simControls(true);
-  startSim();
-}
-
-// -- dialog wiring --
-const dlg = $("dlg");
-$("btnLive").onclick = () => { $("dMsg").textContent = ""; $("dMsg").className = "dlg-msg"; dlg.showModal(); };
-$("dCancel").onclick = () => dlg.close();
-$("btnSim").onclick  = () => disconnectLive();
-$("btnDisc").onclick = () => disconnectLive();
-
-$("dGo").onclick = async () => {
-  const msg = $("dMsg");
-  const host = $("dHost").value.trim(), port = $("dPort").value.trim();
-  const user = $("dUser").value.trim(), pass = $("dPass").value;
-  if (!host || !port){ msg.textContent = "Broker host and port are required."; msg.className="dlg-msg bad"; return; }
-
-  msg.textContent = "Connecting…"; msg.className = "dlg-msg";
-  try {
-    await goLive(host, port, user, pass, null);
-    msg.textContent = "Connected. Discovering feeders…"; msg.className = "dlg-msg good";
-
-    // Retained status messages arrive almost immediately; give them a beat.
-    setTimeout(() => {
-      const sel = $("dBoard");
-      const opts = [...sel.options].filter(o => o.value);
-      if (!opts.length){
-        msg.textContent = "Connected, but no feeders are publishing on grid/+/status.";
-        msg.className = "dlg-msg bad";
-        return;
-      }
-      const chosen = sel.value || opts[0].value;
-      stopSim();
-      simControls(false);          // live data is not ours to actuate
-      subscribeBoard(chosen);
-      $("btnDisc").style.display = "";
-      dlg.close();
-    }, 900);
-  } catch (e) {
-    msg.textContent = "Failed: " + (e.message || e) +
-      "  — check the broker has a websockets listener on this port.";
-    msg.className = "dlg-msg bad";
-  }
-};
-
-updatePhysics(); render();
-startSim();
+setMode('25');
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
